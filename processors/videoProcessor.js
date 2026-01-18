@@ -177,18 +177,16 @@ async function extractFrames(videoPath) {
   }
 
   // Extract frames every 10 seconds (every 10th frame since fps=1)
-  // Limit to max 10 frames to avoid rate limits
   const frames = [];
   const frameInterval = 10; // Every 10 seconds
-  const maxFrames = 10; // Maximum 10 frames per video
   
-  for (let i = 0; i < files.length && frames.length < maxFrames; i += frameInterval) {
+  for (let i = 0; i < files.length; i += frameInterval) {
     const file = zipContent.files[files[i]];
     const imageData = await file.async('base64');
     frames.push(`data:image/png;base64,${imageData}`);
   }
 
-  console.log(`✅ Extracted ${frames.length} frames (every 10 seconds, max ${maxFrames})`);
+  console.log(`✅ Extracted ${frames.length} frames (every 10 seconds)`);
   return { frames, firstFrame };
 }
 
