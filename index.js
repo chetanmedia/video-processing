@@ -20,13 +20,9 @@ const supabase = createClient(
 // Initialize Bull queue
 const videoQueue = new Queue('video-processing', process.env.REDIS_URL || 'redis://localhost:6379', {
   defaultJobOptions: {
-    attempts: 3,
-    backoff: {
-      type: 'exponential',
-      delay: 5000,
-    },
-    removeOnComplete: false,
-    removeOnFail: false,
+    attempts: 1, // No retries - fail immediately
+    removeOnComplete: true, // Clean up completed jobs
+    removeOnFail: false, // Keep failed jobs for debugging
   },
 });
 
