@@ -176,9 +176,9 @@ async function extractFrames(videoPath) {
     firstFrame = `data:image/png;base64,${imageData}`;
   }
 
-  // Extract frames every 10 seconds (every 10th frame since fps=1)
+  // Extract frames every 3 seconds (every 3rd frame since fps=1)
   const frames = [];
-  const frameInterval = 10; // Every 10 seconds
+  const frameInterval = 3; // Every 3 seconds
   
   for (let i = 0; i < files.length; i += frameInterval) {
     const file = zipContent.files[files[i]];
@@ -186,7 +186,7 @@ async function extractFrames(videoPath) {
     frames.push(`data:image/png;base64,${imageData}`);
   }
 
-  console.log(`✅ Extracted ${frames.length} frames (every 10 seconds)`);
+  console.log(`✅ Extracted ${frames.length} frames (every 3 seconds)`);
   return { frames, firstFrame };
 }
 
