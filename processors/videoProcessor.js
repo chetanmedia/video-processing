@@ -244,6 +244,9 @@ async function extractTextFromFrames(frames, openAIKey) {
         if (text.trim().length > 0) {
           allTexts.push(text.trim());
         }
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        console.warn(`⚠️ Frame ${i + 1} API error (${response.status}):`, errorData.error?.message || response.statusText);
       }
     } catch (error) {
       console.warn(`⚠️ Error processing frame ${i + 1}:`, error.message);
@@ -283,7 +286,10 @@ async function parseWorkoutWithAI(caption, extractedText, openAIKey) {
   });
 
   if (!response.ok) {
-    throw new Error(`OpenAI API error: ${response.status}`);
+    const errorData = await response.json().catch(() => ({}));
+    const errorMessage = errorData.error?.message || errorData.message || response.statusText;
+    console.error(`❌ OpenAI API error (${response.status}):`, errorMessage);
+    throw new Error(`OpenAI API error: ${response.status} - ${errorMessage}`);
   }
 
   const data = await response.json();
