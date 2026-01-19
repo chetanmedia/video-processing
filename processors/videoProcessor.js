@@ -101,17 +101,21 @@ module.exports = async function processVideoJob(job, supabase) {
     const isRateLimitError = error.message.includes('429');
     
     if (isRateLimitError) {
-      // Don't mark as failed for rate limits - leave as processing for retry
-      console.log(`⏳ Rate limit hit for workout ${workoutId}, will retry with backoff`);
-      // Throw error to trigger Bull retry with exponential backoff
-      throw new Error('RATE_LIMIT: OpenAI API rate limit exceeded');
+      // For rate limits: keep status as processing, don't throw (prevents retry)
+      console.log(`⏳ Rate limit hit for workout ${workoutId}, marking for manual retry`);
+      await updateWorkout(supabase, workoutId, {
+        status: 'processing', // Keep as processing
+        notes: '⏳ Hit API rate limit. Please wait 1-2 minutes and check back.',
+      });
+      // Don't throw - this prevents Bull from retrying
+      return { success: false, error: 'Rate limit - no auto retry' };
     } else {
       // Mark workout as permanently failed for other errors
       await updateWorkout(supabase, workoutId, {
         status: 'failed',
         processingError: error.message,
       });
-      // Throw regular error (won't retry)
+      // Throw to mark job as failed
       throw error;
     }
   }
