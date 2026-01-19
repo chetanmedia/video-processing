@@ -258,7 +258,7 @@ async function extractTextFromFrames(frames, openAIKey) {
                 type: 'image_url',
                 image_url: {
                   url: frames[i],
-                  detail: 'high',
+                  detail: 'low', // Low = 85 tokens, High = 25k tokens per image!
                 },
               },
             ],
