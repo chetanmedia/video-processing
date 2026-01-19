@@ -56,20 +56,23 @@ app.get('/health', (req, res) => {
 // Submit video processing job
 app.post('/api/process-video', async (req, res) => {
   try {
-    const { workoutId, videoUrl, userId, caption, source, displayUrl } = req.body;
+    const { workoutId, videoUrl, videoUrls, userId, caption, source, displayUrl } = req.body;
 
-    if (!workoutId || !videoUrl || !userId) {
+    // Support both single videoUrl and multiple videoUrls
+    const urls = videoUrls || (videoUrl ? [videoUrl] : []);
+    
+    if (!workoutId || urls.length === 0 || !userId) {
       return res.status(400).json({
-        error: 'Missing required fields: workoutId, videoUrl, userId',
+        error: 'Missing required fields: workoutId, videoUrl(s), userId',
       });
     }
 
-    console.log(`📥 Received video processing request for workout ${workoutId}`);
+    console.log(`📥 Received video processing request for workout ${workoutId} with ${urls.length} video(s)`);
 
     // Add job to queue
     const job = await videoQueue.add({
       workoutId,
-      videoUrl,
+      videoUrls: urls, // Now sending array
       userId,
       caption,
       source,

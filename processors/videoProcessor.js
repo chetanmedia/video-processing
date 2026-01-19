@@ -11,32 +11,55 @@ const unlink = promisify(fs.unlink);
  * Process video job
  */
 module.exports = async function processVideoJob(job, supabase) {
-  const { workoutId, videoUrl, userId, caption, source, displayUrl, openAIKey } = job.data;
+  const { workoutId, videoUrl, videoUrls, userId, caption, source, displayUrl, openAIKey } = job.data;
   
-  console.log(`🎬 Starting video processing for workout ${workoutId}`);
+  // Support both single videoUrl and array videoUrls
+  const urls = videoUrls || [videoUrl];
+  
+  console.log(`🎬 Starting video processing for workout ${workoutId} with ${urls.length} video(s)`);
   job.progress(10);
 
   try {
-    // Step 1: Download video
-    console.log('📥 Step 1: Downloading video...');
-    const videoPath = await downloadVideo(videoUrl, source);
-    job.progress(25);
+    const allFrames = [];
+    let thumbnailFrame = null;
+    
+    // Process each video
+    for (let i = 0; i < urls.length; i++) {
+      const videoUrl = urls[i];
+      console.log(`📹 Processing video ${i + 1}/${urls.length}...`);
+      
+      // Step 1: Download video
+      console.log(`📥 Step 1.${i + 1}: Downloading video...`);
+      const videoPath = await downloadVideo(videoUrl, source);
+      job.progress(10 + (i + 1) * 15 / urls.length); // Progress: 10-25%
 
-    // Step 2: Extract frames
-    console.log('📦 Step 2: Extracting frames...');
-    const { frames, firstFrame } = await extractFrames(videoPath);
-    job.progress(50);
+      // Step 2: Extract frames
+      console.log(`📦 Step 2.${i + 1}: Extracting frames...`);
+      const { frames, firstFrame } = await extractFrames(videoPath);
+      job.progress(25 + (i + 1) * 25 / urls.length); // Progress: 25-50%
 
-    // Cleanup video file
-    await unlink(videoPath);
+      // Cleanup video file
+      await unlink(videoPath);
 
-    if (frames.length === 0) {
-      throw new Error('No frames extracted from video');
+      // Use first video's first frame as thumbnail
+      if (i === 0 && firstFrame) {
+        thumbnailFrame = firstFrame;
+      }
+      
+      // Collect all frames from all videos
+      allFrames.push(...frames);
+      console.log(`✅ Video ${i + 1} processed: ${frames.length} frames extracted`);
     }
+
+    if (allFrames.length === 0) {
+      throw new Error('No frames extracted from any video');
+    }
+    
+    console.log(`📊 Total frames from ${urls.length} video(s): ${allFrames.length}`);
 
     // Step 3: Extract text from frames using OpenAI Vision
     console.log('🔍 Step 3: Extracting text from frames...');
-    const extractedText = await extractTextFromFrames(frames, openAIKey);
+    const extractedText = await extractTextFromFrames(allFrames, openAIKey);
     job.progress(75);
 
     if (!extractedText || extractedText.length === 0) {
@@ -50,7 +73,7 @@ module.exports = async function processVideoJob(job, supabase) {
 
     // Step 5: Update workout in database
     console.log('💾 Step 5: Updating workout in database...');
-    const finalDisplayUrl = (source === 'TikTok' && firstFrame) ? firstFrame : displayUrl;
+    const finalDisplayUrl = (source === 'TikTok' && thumbnailFrame) ? thumbnailFrame : displayUrl;
     
     await updateWorkout(supabase, workoutId, {
       exercises: workoutData.exercises,
@@ -152,6 +175,9 @@ async function extractFrames(videoPath) {
     contentType: 'video/mp4',
   });
 
+  // Extract 1 frame every 3 seconds using select filter
+  // select='not(mod(n\,90))' extracts every 90th frame (at 30fps = 3 seconds)
+  // But we don't know the input fps, so use fps filter: fps=1/3
   const response = await fetch(
     'https://ffmpeg-rest-production-0140.up.railway.app/video/frames?compress=zip&fps=1',
     {
@@ -186,17 +212,16 @@ async function extractFrames(videoPath) {
     firstFrame = `data:image/png;base64,${imageData}`;
   }
 
-  // Extract frames every 3 seconds (every 3rd frame since fps=1)
+  // Extract ALL frames (but take every 3rd to get 3-second intervals)
+  // FFmpeg gives us 1 frame per second, so every 3rd frame = every 3 seconds
   const frames = [];
-  const frameInterval = 3; // Every 3 seconds
-  
-  for (let i = 0; i < files.length; i += frameInterval) {
+  for (let i = 0; i < files.length; i += 3) {
     const file = zipContent.files[files[i]];
     const imageData = await file.async('base64');
     frames.push(`data:image/png;base64,${imageData}`);
   }
 
-  console.log(`✅ Extracted ${frames.length} frames (every 3 seconds)`);
+  console.log(`✅ Extracted ${frames.length} frames from ${files.length} total (every 3 seconds)`);
   return { frames, firstFrame };
 }
 
