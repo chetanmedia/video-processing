@@ -11,32 +11,32 @@ const unlink = promisify(fs.unlink);
  * Process video job
  */
 module.exports = async function processVideoJob(job, supabase) {
-  const { workoutId, videoUrl, videoUrls, userId, caption, source, displayUrl, openAIKey } = job.data;
+  const { workoutId, videoUrl, videoUrls, videoFiles, userId, caption, source, displayUrl, openAIKey } = job.data;
   
-  // Support both single videoUrl and array videoUrls
-  const urls = videoUrls || [videoUrl];
+  // Support both file uploads and URLs
+  const hasFiles = videoFiles && videoFiles.length > 0;
+  const hasUrls = videoUrls || videoUrl;
   
-  console.log(`🎬 Starting video processing for workout ${workoutId} with ${urls.length} video(s)`);
+  const files = hasFiles ? videoFiles : [];
+  const urls = hasUrls ? (videoUrls || [videoUrl]) : [];
+  const totalVideos = files.length + urls.length;
+  
+  console.log(`🎬 Starting video processing for workout ${workoutId} with ${totalVideos} video(s) (${files.length} uploaded, ${urls.length} URLs)`);
   job.progress(10);
 
   try {
     const allFrames = [];
     let thumbnailFrame = null;
     
-    // Process each video
-    for (let i = 0; i < urls.length; i++) {
-      const videoUrl = urls[i];
-      console.log(`📹 Processing video ${i + 1}/${urls.length}...`);
+    // Process uploaded files
+    for (let i = 0; i < files.length; i++) {
+      const videoPath = files[i];
+      console.log(`📹 Processing uploaded video ${i + 1}/${files.length}...`);
       
-      // Step 1: Download video
-      console.log(`📥 Step 1.${i + 1}: Downloading video...`);
-      const videoPath = await downloadVideo(videoUrl, source);
-      job.progress(10 + (i + 1) * 15 / urls.length); // Progress: 10-25%
-
-      // Step 2: Extract frames
+      // Step 2: Extract frames (already have the file, skip download)
       console.log(`📦 Step 2.${i + 1}: Extracting frames...`);
       const { frames, firstFrame } = await extractFrames(videoPath);
-      job.progress(25 + (i + 1) * 25 / urls.length); // Progress: 25-50%
+      job.progress(25 + (i + 1) * 25 / totalVideos);
 
       // Cleanup video file
       await unlink(videoPath);
@@ -46,16 +46,45 @@ module.exports = async function processVideoJob(job, supabase) {
         thumbnailFrame = firstFrame;
       }
       
-      // Collect all frames from all videos
+      // Collect all frames
       allFrames.push(...frames);
-      console.log(`✅ Video ${i + 1} processed: ${frames.length} frames extracted`);
+      console.log(`✅ Uploaded video ${i + 1} processed: ${frames.length} frames extracted`);
+    }
+    
+    // Process URL videos (Instagram)
+    for (let i = 0; i < urls.length; i++) {
+      const videoUrl = urls[i];
+      const videoIndex = files.length + i + 1;
+      console.log(`📹 Processing video ${videoIndex}/${totalVideos} from URL...`);
+      
+      // Step 1: Download video
+      console.log(`📥 Step 1.${videoIndex}: Downloading video...`);
+      const videoPath = await downloadVideo(videoUrl, source);
+      job.progress(10 + videoIndex * 15 / totalVideos);
+
+      // Step 2: Extract frames
+      console.log(`📦 Step 2.${videoIndex}: Extracting frames...`);
+      const { frames, firstFrame } = await extractFrames(videoPath);
+      job.progress(25 + videoIndex * 25 / totalVideos);
+
+      // Cleanup video file
+      await unlink(videoPath);
+
+      // Use first video's first frame as thumbnail if no uploaded videos
+      if (files.length === 0 && i === 0 && firstFrame) {
+        thumbnailFrame = firstFrame;
+      }
+      
+      // Collect all frames
+      allFrames.push(...frames);
+      console.log(`✅ Video ${videoIndex} processed: ${frames.length} frames extracted`);
     }
 
     if (allFrames.length === 0) {
       throw new Error('No frames extracted from any video');
     }
     
-    console.log(`📊 Total frames from ${urls.length} video(s): ${allFrames.length}`);
+    console.log(`📊 Total frames from ${totalVideos} video(s): ${allFrames.length}`);
 
     // Step 3: Extract text from frames using OpenAI Vision
     console.log('🔍 Step 3: Extracting text from frames...');
@@ -125,17 +154,23 @@ module.exports = async function processVideoJob(job, supabase) {
  * Download video from URL
  */
 async function downloadVideo(videoUrl, source) {
-  const isTikTok = videoUrl.includes('tiktok.com');
+  const isTikTok = videoUrl.includes('tiktok.com') || videoUrl.includes('tiktokcdn.com');
   
   const headers = {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
   };
 
   if (isTikTok) {
+    // More headers to bypass TikTok's anti-bot
     headers['Referer'] = 'https://www.tiktok.com/';
     headers['Origin'] = 'https://www.tiktok.com';
-    headers['Accept'] = 'video/mp4,video/*,*/*';
+    headers['Accept'] = 'video/mp4,video/webm,video/*,*/*;q=0.9,application/signed-exchange;v=b3;q=0.7,*/*;q=0.8';
+    headers['Accept-Language'] = 'en-US,en;q=0.9';
+    headers['Accept-Encoding'] = 'identity';
     headers['Range'] = 'bytes=0-';
+    headers['Sec-Fetch-Dest'] = 'video';
+    headers['Sec-Fetch-Mode'] = 'no-cors';
+    headers['Sec-Fetch-Site'] = 'same-site';
   }
 
   const controller = new AbortController();
