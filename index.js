@@ -20,7 +20,21 @@ const upload = multer({
 app.use(cors());
 app.use(express.json());
 
+// Debug: Log environment variables (without exposing full values)
+console.log('🔍 Environment Check:');
+console.log('  SUPABASE_URL:', process.env.SUPABASE_URL ? '✅ Set' : '❌ Missing');
+console.log('  SUPABASE_SERVICE_ROLE_KEY:', process.env.SUPABASE_SERVICE_ROLE_KEY ? '✅ Set' : '❌ Missing');
+console.log('  OPENAI_API_KEY:', process.env.OPENAI_API_KEY ? '✅ Set' : '❌ Missing');
+console.log('  REDIS_URL:', process.env.REDIS_URL ? '✅ Set' : '❌ Missing');
+
 // Initialize Supabase client
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('❌ ERROR: Missing required environment variables!');
+  console.error('   Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Railway dashboard');
+  console.error('   Go to: Railway Dashboard → Your Service → Variables tab');
+  process.exit(1);
+}
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -42,8 +56,12 @@ const videoQueue = new Queue('video-processing', process.env.REDIS_URL || 'redis
 // Import job processor
 const processVideoJob = require('./processors/videoProcessor');
 
-// Process jobs
-videoQueue.process(async (job) => {
+// Process jobs with concurrency
+// Process up to N jobs simultaneously (configurable via env var)
+const CONCURRENCY = parseInt(process.env.QUEUE_CONCURRENCY || '5', 10);
+console.log(`📊 Queue concurrency set to: ${CONCURRENCY}`);
+
+videoQueue.process(CONCURRENCY, async (job) => {
   console.log(`🎬 Processing job ${job.id}...`);
   return await processVideoJob(job, supabase);
 });

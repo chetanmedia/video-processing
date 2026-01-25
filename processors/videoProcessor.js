@@ -6,6 +6,7 @@ const path = require('path');
 const { promisify } = require('util');
 const writeFile = promisify(fs.writeFile);
 const unlink = promisify(fs.unlink);
+const { sendWorkoutProcessingNotification } = require('../utils/pushNotifications');
 
 /**
  * Process video job
@@ -117,6 +118,19 @@ module.exports = async function processVideoJob(job, supabase) {
     job.progress(100);
     console.log(`✅ Workout ${workoutId} processed successfully`);
 
+    // Send push notification to user
+    try {
+      await sendWorkoutProcessingNotification(
+        supabase,
+        userId,
+        workoutData.name || 'Your workout',
+        true
+      );
+    } catch (notifError) {
+      // Don't fail the job if notification fails
+      console.warn('⚠️ Failed to send notification:', notifError.message);
+    }
+
     return {
       success: true,
       workoutId,
@@ -144,6 +158,19 @@ module.exports = async function processVideoJob(job, supabase) {
         status: 'failed',
         processingError: error.message,
       });
+      
+      // Send failure notification to user
+      try {
+        await sendWorkoutProcessingNotification(
+          supabase,
+          userId,
+          'Workout',
+          false
+        );
+      } catch (notifError) {
+        console.warn('⚠️ Failed to send failure notification:', notifError.message);
+      }
+      
       // Throw to mark job as failed
       throw error;
     }
