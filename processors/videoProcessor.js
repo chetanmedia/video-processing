@@ -3,9 +3,11 @@ const FormData = require('form-data');
 const JSZip = require('jszip');
 const fs = require('fs');
 const path = require('path');
+const { exec } = require('child_process');
 const { promisify } = require('util');
 const writeFile = promisify(fs.writeFile);
 const unlink = promisify(fs.unlink);
+const execPromise = promisify(exec);
 const { sendWorkoutProcessingNotification } = require('../utils/pushNotifications');
 
 /**
@@ -232,63 +234,95 @@ async function downloadVideo(videoUrl, source) {
 }
 
 /**
- * Extract frames from video using FFmpeg API
+ * Extract frames from video using local FFmpeg
  */
 async function extractFrames(videoPath) {
-  const formData = new FormData();
-  formData.append('file', fs.createReadStream(videoPath), {
-    filename: 'video.mp4',
-    contentType: 'video/mp4',
-  });
-
-  // Extract 1 frame every 3 seconds using select filter
-  // select='not(mod(n\,90))' extracts every 90th frame (at 30fps = 3 seconds)
-  // But we don't know the input fps, so use fps filter: fps=1/3
-  const response = await fetch(
-    'https://ffmpeg-rest-production-0140.up.railway.app/video/frames?compress=zip&fps=1',
-    {
-      method: 'POST',
-      body: formData,
-      headers: formData.getHeaders(),
-    }
-  );
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`FFmpeg API error: ${response.status} - ${errorText}`);
+  // Check if file exists
+  if (!fs.existsSync(videoPath)) {
+    throw new Error(`Video file not found: ${videoPath}`);
   }
-
-  const arrayBuffer = await response.arrayBuffer();
-  const zip = new JSZip();
-  const zipContent = await zip.loadAsync(Buffer.from(arrayBuffer));
-
-  const files = Object.keys(zipContent.files).filter(name => name.endsWith('.png')).sort();
   
-  if (files.length === 0) {
-    throw new Error('No frames found in ZIP');
+  const stats = fs.statSync(videoPath);
+  console.log(`📹 Video file size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+  
+  // Create output directory for frames
+  const framesDir = path.join('/tmp', `frames_${Date.now()}`);
+  if (!fs.existsSync(framesDir)) {
+    fs.mkdirSync(framesDir, { recursive: true });
   }
-
-  console.log(`📸 Found ${files.length} frames in ZIP`);
-
-  // Extract first frame for thumbnail
-  let firstFrame = null;
-  if (files.length > 0) {
-    const firstFile = zipContent.files[files[0]];
-    const imageData = await firstFile.async('base64');
-    firstFrame = `data:image/png;base64,${imageData}`;
+  
+  console.log('🎞️ Extracting frames with local FFmpeg...');
+  
+  try {
+    // Extract 1 frame per second using FFmpeg
+    // -i: input file
+    // -vf fps=1: extract 1 frame per second
+    // -q:v 2: high quality (1-31, lower is better)
+    const command = `ffmpeg -i "${videoPath}" -vf fps=1 -q:v 2 "${framesDir}/frame_%04d.png"`;
+    
+    const { stdout, stderr } = await execPromise(command, {
+      timeout: 120000, // 2 minute timeout
+      maxBuffer: 10 * 1024 * 1024, // 10MB buffer for command output
+    });
+    
+    console.log('✅ FFmpeg extraction complete');
+    
+    // Read all frame files
+    const frameFiles = fs.readdirSync(framesDir)
+      .filter(f => f.endsWith('.png'))
+      .sort();
+    
+    if (frameFiles.length === 0) {
+      throw new Error('No frames extracted from video');
+    }
+    
+    console.log(`📸 Found ${frameFiles.length} frames`);
+    
+    // Convert frames to base64
+    const frames = [];
+    let firstFrame = null;
+    
+    for (let i = 0; i < frameFiles.length; i += 3) { // Take every 3rd frame (3 second intervals)
+      const framePath = path.join(framesDir, frameFiles[i]);
+      const imageBuffer = fs.readFileSync(framePath);
+      const base64 = imageBuffer.toString('base64');
+      const dataUrl = `data:image/png;base64,${base64}`;
+      frames.push(dataUrl);
+      
+      // Save first frame as thumbnail
+      if (i === 0) {
+        firstFrame = dataUrl;
+      }
+    }
+    
+    // Cleanup frames directory
+    for (const file of frameFiles) {
+      await unlink(path.join(framesDir, file));
+    }
+    fs.rmdirSync(framesDir);
+    
+    console.log(`✅ Extracted ${frames.length} frames from ${frameFiles.length} total (every 3 seconds)`);
+    return { frames, firstFrame };
+    
+  } catch (error) {
+    // Cleanup on error
+    if (fs.existsSync(framesDir)) {
+      try {
+        const files = fs.readdirSync(framesDir);
+        for (const file of files) {
+          await unlink(path.join(framesDir, file));
+        }
+        fs.rmdirSync(framesDir);
+      } catch (cleanupError) {
+        console.warn('⚠️ Cleanup error:', cleanupError.message);
+      }
+    }
+    
+    if (error.killed && error.signal === 'SIGTERM') {
+      throw new Error('FFmpeg processing timeout (exceeded 2 minutes)');
+    }
+    throw new Error(`FFmpeg error: ${error.message}`);
   }
-
-  // Extract ALL frames (but take every 3rd to get 3-second intervals)
-  // FFmpeg gives us 1 frame per second, so every 3rd frame = every 3 seconds
-  const frames = [];
-  for (let i = 0; i < files.length; i += 3) {
-    const file = zipContent.files[files[i]];
-    const imageData = await file.async('base64');
-    frames.push(`data:image/png;base64,${imageData}`);
-  }
-
-  console.log(`✅ Extracted ${frames.length} frames from ${files.length} total (every 3 seconds)`);
-  return { frames, firstFrame };
 }
 
 /**
