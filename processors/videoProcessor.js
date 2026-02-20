@@ -260,12 +260,17 @@ async function extractFrames(videoPath) {
     // -q:v 2: high quality (1-31, lower is better)
     const command = `ffmpeg -i "${videoPath}" -vf fps=1 -q:v 2 "${framesDir}/frame_%04d.png"`;
     
+    console.log(`🔧 FFmpeg command: ${command}`);
+    
     const { stdout, stderr } = await execPromise(command, {
       timeout: 120000, // 2 minute timeout
       maxBuffer: 10 * 1024 * 1024, // 10MB buffer for command output
     });
     
     console.log('✅ FFmpeg extraction complete');
+    if (stderr) {
+      console.log('📋 FFmpeg output:', stderr.substring(0, 200)); // Log first 200 chars of stderr
+    }
     
     // Read all frame files
     const frameFiles = fs.readdirSync(framesDir)
@@ -317,6 +322,15 @@ async function extractFrames(videoPath) {
         console.warn('⚠️ Cleanup error:', cleanupError.message);
       }
     }
+    
+    console.error('❌ FFmpeg error details:', {
+      message: error.message,
+      code: error.code,
+      killed: error.killed,
+      signal: error.signal,
+      stderr: error.stderr?.substring(0, 500), // Log first 500 chars
+      stdout: error.stdout?.substring(0, 500)
+    });
     
     if (error.killed && error.signal === 'SIGTERM') {
       throw new Error('FFmpeg processing timeout (exceeded 2 minutes)');
