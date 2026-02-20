@@ -80,6 +80,28 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// FFmpeg check endpoint
+app.get('/ffmpeg-check', async (req, res) => {
+  try {
+    const { exec } = require('child_process');
+    const { promisify } = require('util');
+    const execPromise = promisify(exec);
+    
+    const { stdout, stderr } = await execPromise('ffmpeg -version');
+    res.json({ 
+      status: 'ok', 
+      ffmpeg: 'installed',
+      version: stdout.split('\n')[0]
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'error', 
+      ffmpeg: 'not found',
+      error: error.message 
+    });
+  }
+});
+
 // Submit video processing job (with file upload for TikTok)
 app.post('/api/process-video-upload', upload.array('videos', 10), async (req, res) => {
   try {
