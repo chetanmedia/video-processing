@@ -10,44 +10,28 @@ const unlink = promisify(fs.unlink);
 const execPromise = promisify(exec);
 const { sendWorkoutProcessingNotification } = require('../utils/pushNotifications');
 const { uploadWorkoutSourceVideo } = require('../utils/videoStorage');
+const { downloadVideo } = require('../utils/videoDownload');
+const { stitchVideos } = require('../utils/videoStitcher');
 
 /**
- * Process a local video file: persist to Supabase, extract frames, cleanup.
+ * Extract frames from a local video file (no upload).
  */
-async function processLocalVideoFile({
-  supabase,
+async function extractFramesFromLocalFile({
   videoPath,
-  userId,
-  workoutId,
-  storageIndex,
-  job,
-  progressBase,
-  progressSpan,
   allFrames,
   thumbnailFrameRef,
   captureThumbnail,
+  videoLabel,
 }) {
-  const storedUrl = await uploadWorkoutSourceVideo(supabase, {
-    localPath: videoPath,
-    userId,
-    workoutId,
-    index: storageIndex,
-  });
-
-  console.log(`📦 Extracting frames from video ${storageIndex + 1}...`);
+  console.log(`📦 Extracting frames from ${videoLabel}...`);
   const { frames, firstFrame } = await extractFrames(videoPath);
-  job.progress(progressBase + progressSpan);
-
-  await unlink(videoPath);
 
   if (captureThumbnail && firstFrame) {
     thumbnailFrameRef.value = firstFrame;
   }
 
   allFrames.push(...frames);
-  console.log(`✅ Video ${storageIndex + 1} processed: ${frames.length} frames extracted`);
-
-  return storedUrl;
+  console.log(`✅ ${videoLabel} processed: ${frames.length} frames extracted`);
 }
 
 /**
@@ -62,90 +46,67 @@ module.exports = async function processVideoJob(job, supabase) {
   
   const files = hasFiles ? videoFiles : [];
   const urls = hasUrls ? (videoUrls || [videoUrl]) : [];
-  const totalVideos = files.length + urls.length;
+  const expectedVideoCount = files.length + urls.length;
   
-  console.log(`🎬 Starting video processing for workout ${workoutId} with ${totalVideos} video(s) (${files.length} uploaded, ${urls.length} URLs)`);
+  console.log(`🎬 Starting video processing for workout ${workoutId} with ${expectedVideoCount} video(s) (${files.length} uploaded, ${urls.length} URLs)`);
   job.progress(10);
 
   try {
     const allFrames = [];
     const thumbnailFrameRef = { value: null };
-    const permanentVideoUrls = [];
-    let storageIndex = 0;
-    
-    // Process uploaded files (TikTok app uploads)
-    for (let i = 0; i < files.length; i++) {
-      const videoPath = files[i];
-      console.log(`📹 Processing uploaded video ${i + 1}/${files.length}...`);
+    const localVideoPaths = [...files];
 
-      const storedUrl = await processLocalVideoFile({
-        supabase,
-        videoPath,
+    for (let i = 0; i < urls.length; i++) {
+      console.log(`📥 Downloading video ${i + 1}/${urls.length}...`);
+      const videoPath = await downloadVideo(urls[i], source);
+      localVideoPaths.push(videoPath);
+      job.progress(10 + (i + 1) * 15 / Math.max(urls.length, 1));
+    }
+
+    const totalVideos = localVideoPaths.length;
+    console.log(`📊 Collected ${totalVideos} local video file(s) for processing`);
+
+    let playbackUrl = null;
+    if (totalVideos > 0) {
+      let uploadPath = localVideoPaths[0];
+      if (totalVideos > 1) {
+        const stitchedPath = path.join('/tmp', `stitched_${workoutId}_${Date.now()}.mp4`);
+        await stitchVideos(localVideoPaths, stitchedPath);
+        uploadPath = stitchedPath;
+      }
+
+      playbackUrl = await uploadWorkoutSourceVideo(supabase, {
+        localPath: uploadPath,
         userId,
         workoutId,
-        storageIndex,
-        job,
-        progressBase: 25 + (storageIndex + 1) * 25 / totalVideos,
-        progressSpan: 0,
+        index: 'stitched',
+      });
+
+      if (uploadPath !== localVideoPaths[0] && fs.existsSync(uploadPath)) {
+        await unlink(uploadPath).catch(() => {});
+      }
+
+      if (playbackUrl) {
+        await updateWorkout(supabase, workoutId, {
+          videoUrl: playbackUrl,
+          storedVideoUrls: [playbackUrl],
+        });
+      }
+    }
+
+    for (let i = 0; i < localVideoPaths.length; i++) {
+      await extractFramesFromLocalFile({
+        videoPath: localVideoPaths[i],
         allFrames,
         thumbnailFrameRef,
         captureThumbnail: i === 0,
+        videoLabel: `video ${i + 1}/${totalVideos}`,
       });
-
-      if (storedUrl) {
-        permanentVideoUrls.push(storedUrl);
-        if (permanentVideoUrls.length === 1) {
-          await updateWorkout(supabase, workoutId, {
-            videoUrl: storedUrl,
-            storedVideoUrls: permanentVideoUrls,
-          });
-        }
-      }
-
-      storageIndex += 1;
-    }
-    
-    // Process URL videos (Instagram / direct CDN URLs)
-    for (let i = 0; i < urls.length; i++) {
-      const sourceVideoUrl = urls[i];
-      const videoIndex = files.length + i + 1;
-      console.log(`📹 Processing video ${videoIndex}/${totalVideos} from URL...`);
-      
-      console.log(`📥 Downloading video ${videoIndex}...`);
-      const videoPath = await downloadVideo(sourceVideoUrl, source);
-      job.progress(10 + videoIndex * 15 / totalVideos);
-
-      const storedUrl = await processLocalVideoFile({
-        supabase,
-        videoPath,
-        userId,
-        workoutId,
-        storageIndex,
-        job,
-        progressBase: 25 + (storageIndex + 1) * 25 / totalVideos,
-        progressSpan: 0,
-        allFrames,
-        thumbnailFrameRef,
-        captureThumbnail: files.length === 0 && i === 0,
-      });
-
-      if (storedUrl) {
-        permanentVideoUrls.push(storedUrl);
-        if (permanentVideoUrls.length === 1) {
-          await updateWorkout(supabase, workoutId, {
-            videoUrl: storedUrl,
-            storedVideoUrls: permanentVideoUrls,
-          });
-        } else {
-          await updateWorkout(supabase, workoutId, {
-            storedVideoUrls: permanentVideoUrls,
-          });
-        }
-      }
-
-      storageIndex += 1;
+      job.progress(25 + (i + 1) * 25 / Math.max(totalVideos, 1));
+      await unlink(localVideoPaths[i]).catch(() => {});
     }
 
+    const permanentVideoUrls = playbackUrl ? [playbackUrl] : [];
     const thumbnailFrame = thumbnailFrameRef.value;
 
     if (allFrames.length === 0) {
@@ -249,66 +210,6 @@ module.exports = async function processVideoJob(job, supabase) {
     }
   }
 };
-
-/**
- * Download video from URL
- */
-async function downloadVideo(videoUrl, source) {
-  const isTikTok = videoUrl.includes('tiktok.com') || videoUrl.includes('tiktokcdn.com');
-  const isFacebook = videoUrl.includes('facebook.com') || videoUrl.includes('fbcdn.net') || videoUrl.includes('fb.watch');
-  
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-  };
-
-  if (isTikTok) {
-    // More headers to bypass TikTok's anti-bot
-    headers['Referer'] = 'https://www.tiktok.com/';
-    headers['Origin'] = 'https://www.tiktok.com';
-    headers['Accept'] = 'video/mp4,video/webm,video/*,*/*;q=0.9,application/signed-exchange;v=b3;q=0.7,*/*;q=0.8';
-    headers['Accept-Language'] = 'en-US,en;q=0.9';
-    headers['Accept-Encoding'] = 'identity';
-    headers['Range'] = 'bytes=0-';
-    headers['Sec-Fetch-Dest'] = 'video';
-    headers['Sec-Fetch-Mode'] = 'no-cors';
-    headers['Sec-Fetch-Site'] = 'same-site';
-  } else if (isFacebook) {
-    headers['Referer'] = 'https://www.facebook.com/';
-    headers['Origin'] = 'https://www.facebook.com';
-    headers['Accept'] = 'video/mp4,video/*,*/*;q=0.9';
-    headers['Accept-Language'] = 'en-US,en;q=0.9';
-  }
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
-
-  try {
-    const response = await fetch(videoUrl, {
-      signal: controller.signal,
-      headers,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      throw new Error(`Failed to download video: ${response.status}`);
-    }
-
-    const buffer = await response.buffer();
-    const videoPath = path.join('/tmp', `video_${Date.now()}.mp4`);
-    await writeFile(videoPath, buffer);
-
-    console.log(`✅ Video downloaded: ${(buffer.length / 1024 / 1024).toFixed(2)} MB`);
-    return videoPath;
-
-  } catch (error) {
-    clearTimeout(timeoutId);
-    if (error.name === 'AbortError') {
-      throw new Error('Video download timeout');
-    }
-    throw error;
-  }
-}
 
 /**
  * Extract frames from video using local FFmpeg

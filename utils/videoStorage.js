@@ -22,6 +22,9 @@ function getVideoContentType(filePath) {
 }
 
 function getStoragePath(userId, workoutId, index, filePath) {
+  if (index === 'stitched') {
+    return `sources/${userId}/${workoutId}/stitched.mp4`;
+  }
   const ext = path.extname(filePath).toLowerCase() || '.mp4';
   const safeExt = ['.mp4', '.mov', '.webm'].includes(ext) ? ext : '.mp4';
   return `sources/${userId}/${workoutId}/source_${index}${safeExt}`;

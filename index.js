@@ -55,6 +55,7 @@ const videoQueue = new Queue('video-processing', process.env.REDIS_URL || 'redis
 
 // Import job processor
 const processVideoJob = require('./processors/videoProcessor');
+const { stitchAndStoreWorkoutVideo } = require('./utils/stitchAndStoreWorkoutVideo');
 
 // Process jobs with concurrency
 // Process up to N jobs simultaneously (configurable via env var)
@@ -180,6 +181,41 @@ app.post('/api/process-video', async (req, res) => {
     console.error('❌ Error submitting job:', error);
     res.status(500).json({
       error: 'Failed to submit video processing job',
+      message: error.message,
+    });
+  }
+});
+
+// Stitch carousel clips and store a single playback video (caption imports)
+app.post('/api/stitch-and-store-video', async (req, res) => {
+  try {
+    const { workoutId, userId, videoUrls, source } = req.body;
+    const urls = videoUrls || [];
+
+    if (!workoutId || !userId || urls.length === 0) {
+      return res.status(400).json({
+        error: 'Missing required fields: workoutId, userId, videoUrls',
+      });
+    }
+
+    console.log(`🎬 Stitch-and-store request for workout ${workoutId} (${urls.length} clip(s))`);
+
+    const result = await stitchAndStoreWorkoutVideo(supabase, {
+      workoutId,
+      userId,
+      videoUrls: urls,
+      source,
+    });
+
+    res.json({
+      success: true,
+      permanentUrl: result.permanentUrl,
+      storedVideoUrls: result.storedVideoUrls,
+    });
+  } catch (error) {
+    console.error('❌ Error stitching/storing video:', error);
+    res.status(500).json({
+      error: 'Failed to stitch and store video',
       message: error.message,
     });
   }
