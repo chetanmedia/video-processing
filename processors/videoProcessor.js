@@ -12,6 +12,7 @@ const { sendWorkoutProcessingNotification } = require('../utils/pushNotification
 const { uploadWorkoutSourceVideo } = require('../utils/videoStorage');
 const { downloadVideo } = require('../utils/videoDownload');
 const { stitchVideos } = require('../utils/videoStitcher');
+const { ensureIosCompatibleVideo } = require('../utils/videoTranscoder');
 
 /**
  * Extract frames from a local video file (no upload).
@@ -66,32 +67,18 @@ module.exports = async function processVideoJob(job, supabase) {
     const totalVideos = localVideoPaths.length;
     console.log(`📊 Collected ${totalVideos} local video file(s) for processing`);
 
-    let playbackUrl = null;
+    let playbackUploadPath = null;
     if (totalVideos > 0) {
-      let uploadPath = localVideoPaths[0];
+      let sourcePath = localVideoPaths[0];
       if (totalVideos > 1) {
         const stitchedPath = path.join('/tmp', `stitched_${workoutId}_${Date.now()}.mp4`);
-        await stitchVideos(localVideoPaths, stitchedPath);
-        uploadPath = stitchedPath;
+        sourcePath = await stitchVideos(localVideoPaths, stitchedPath);
+      } else {
+        const compatiblePath = path.join('/tmp', `playback_${workoutId}_${Date.now()}.mp4`);
+        sourcePath = await ensureIosCompatibleVideo(localVideoPaths[0], compatiblePath);
       }
 
-      playbackUrl = await uploadWorkoutSourceVideo(supabase, {
-        localPath: uploadPath,
-        userId,
-        workoutId,
-        index: 'stitched',
-      });
-
-      if (uploadPath !== localVideoPaths[0] && fs.existsSync(uploadPath)) {
-        await unlink(uploadPath).catch(() => {});
-      }
-
-      if (playbackUrl) {
-        await updateWorkout(supabase, workoutId, {
-          videoUrl: playbackUrl,
-          storedVideoUrls: [playbackUrl],
-        });
-      }
+      playbackUploadPath = sourcePath;
     }
 
     for (let i = 0; i < localVideoPaths.length; i++) {
@@ -103,10 +90,30 @@ module.exports = async function processVideoJob(job, supabase) {
         videoLabel: `video ${i + 1}/${totalVideos}`,
       });
       job.progress(25 + (i + 1) * 25 / Math.max(totalVideos, 1));
-      await unlink(localVideoPaths[i]).catch(() => {});
     }
 
-    const permanentVideoUrls = playbackUrl ? [playbackUrl] : [];
+    let permanentVideoUrls = [];
+    if (playbackUploadPath) {
+      const playbackUrl = await uploadWorkoutSourceVideo(supabase, {
+        localPath: playbackUploadPath,
+        userId,
+        workoutId,
+        index: 'stitched',
+      });
+
+      if (playbackUrl) {
+        permanentVideoUrls = [playbackUrl];
+      }
+    }
+
+    for (const localPath of localVideoPaths) {
+      if (localPath !== playbackUploadPath && fs.existsSync(localPath)) {
+        await unlink(localPath).catch(() => {});
+      }
+    }
+    if (playbackUploadPath && fs.existsSync(playbackUploadPath)) {
+      await unlink(playbackUploadPath).catch(() => {});
+    }
     const thumbnailFrame = thumbnailFrameRef.value;
 
     if (allFrames.length === 0) {
