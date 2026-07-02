@@ -9,6 +9,46 @@ const writeFile = promisify(fs.writeFile);
 const unlink = promisify(fs.unlink);
 const execPromise = promisify(exec);
 const { sendWorkoutProcessingNotification } = require('../utils/pushNotifications');
+const { uploadWorkoutSourceVideo } = require('../utils/videoStorage');
+
+/**
+ * Process a local video file: persist to Supabase, extract frames, cleanup.
+ */
+async function processLocalVideoFile({
+  supabase,
+  videoPath,
+  userId,
+  workoutId,
+  storageIndex,
+  job,
+  progressBase,
+  progressSpan,
+  allFrames,
+  thumbnailFrameRef,
+  captureThumbnail,
+}) {
+  const storedUrl = await uploadWorkoutSourceVideo(supabase, {
+    localPath: videoPath,
+    userId,
+    workoutId,
+    index: storageIndex,
+  });
+
+  console.log(`📦 Extracting frames from video ${storageIndex + 1}...`);
+  const { frames, firstFrame } = await extractFrames(videoPath);
+  job.progress(progressBase + progressSpan);
+
+  await unlink(videoPath);
+
+  if (captureThumbnail && firstFrame) {
+    thumbnailFrameRef.value = firstFrame;
+  }
+
+  allFrames.push(...frames);
+  console.log(`✅ Video ${storageIndex + 1} processed: ${frames.length} frames extracted`);
+
+  return storedUrl;
+}
 
 /**
  * Process video job
@@ -29,59 +69,84 @@ module.exports = async function processVideoJob(job, supabase) {
 
   try {
     const allFrames = [];
-    let thumbnailFrame = null;
+    const thumbnailFrameRef = { value: null };
+    const permanentVideoUrls = [];
+    let storageIndex = 0;
     
-    // Process uploaded files
+    // Process uploaded files (TikTok app uploads)
     for (let i = 0; i < files.length; i++) {
       const videoPath = files[i];
       console.log(`📹 Processing uploaded video ${i + 1}/${files.length}...`);
-      
-      // Step 2: Extract frames (already have the file, skip download)
-      console.log(`📦 Step 2.${i + 1}: Extracting frames...`);
-      const { frames, firstFrame } = await extractFrames(videoPath);
-      job.progress(25 + (i + 1) * 25 / totalVideos);
 
-      // Cleanup video file
-      await unlink(videoPath);
+      const storedUrl = await processLocalVideoFile({
+        supabase,
+        videoPath,
+        userId,
+        workoutId,
+        storageIndex,
+        job,
+        progressBase: 25 + (storageIndex + 1) * 25 / totalVideos,
+        progressSpan: 0,
+        allFrames,
+        thumbnailFrameRef,
+        captureThumbnail: i === 0,
+      });
 
-      // Use first video's first frame as thumbnail
-      if (i === 0 && firstFrame) {
-        thumbnailFrame = firstFrame;
+      if (storedUrl) {
+        permanentVideoUrls.push(storedUrl);
+        if (permanentVideoUrls.length === 1) {
+          await updateWorkout(supabase, workoutId, {
+            videoUrl: storedUrl,
+            storedVideoUrls: permanentVideoUrls,
+          });
+        }
       }
-      
-      // Collect all frames
-      allFrames.push(...frames);
-      console.log(`✅ Uploaded video ${i + 1} processed: ${frames.length} frames extracted`);
+
+      storageIndex += 1;
     }
     
-    // Process URL videos (Instagram)
+    // Process URL videos (Instagram / direct CDN URLs)
     for (let i = 0; i < urls.length; i++) {
-      const videoUrl = urls[i];
+      const sourceVideoUrl = urls[i];
       const videoIndex = files.length + i + 1;
       console.log(`📹 Processing video ${videoIndex}/${totalVideos} from URL...`);
       
-      // Step 1: Download video
-      console.log(`📥 Step 1.${videoIndex}: Downloading video...`);
-      const videoPath = await downloadVideo(videoUrl, source);
+      console.log(`📥 Downloading video ${videoIndex}...`);
+      const videoPath = await downloadVideo(sourceVideoUrl, source);
       job.progress(10 + videoIndex * 15 / totalVideos);
 
-      // Step 2: Extract frames
-      console.log(`📦 Step 2.${videoIndex}: Extracting frames...`);
-      const { frames, firstFrame } = await extractFrames(videoPath);
-      job.progress(25 + videoIndex * 25 / totalVideos);
+      const storedUrl = await processLocalVideoFile({
+        supabase,
+        videoPath,
+        userId,
+        workoutId,
+        storageIndex,
+        job,
+        progressBase: 25 + (storageIndex + 1) * 25 / totalVideos,
+        progressSpan: 0,
+        allFrames,
+        thumbnailFrameRef,
+        captureThumbnail: files.length === 0 && i === 0,
+      });
 
-      // Cleanup video file
-      await unlink(videoPath);
-
-      // Use first video's first frame as thumbnail if no uploaded videos
-      if (files.length === 0 && i === 0 && firstFrame) {
-        thumbnailFrame = firstFrame;
+      if (storedUrl) {
+        permanentVideoUrls.push(storedUrl);
+        if (permanentVideoUrls.length === 1) {
+          await updateWorkout(supabase, workoutId, {
+            videoUrl: storedUrl,
+            storedVideoUrls: permanentVideoUrls,
+          });
+        } else {
+          await updateWorkout(supabase, workoutId, {
+            storedVideoUrls: permanentVideoUrls,
+          });
+        }
       }
-      
-      // Collect all frames
-      allFrames.push(...frames);
-      console.log(`✅ Video ${videoIndex} processed: ${frames.length} frames extracted`);
+
+      storageIndex += 1;
     }
+
+    const thumbnailFrame = thumbnailFrameRef.value;
 
     if (allFrames.length === 0) {
       throw new Error('No frames extracted from any video');
@@ -115,6 +180,12 @@ module.exports = async function processVideoJob(job, supabase) {
       notes: workoutData.notes + '\n\n[Enhanced with video frame analysis]',
       displayUrl: finalDisplayUrl,
       status: 'completed',
+      ...(permanentVideoUrls.length > 0
+        ? {
+            videoUrl: permanentVideoUrls[0],
+            storedVideoUrls: permanentVideoUrls,
+          }
+        : {}),
     });
 
     job.progress(100);
@@ -184,6 +255,7 @@ module.exports = async function processVideoJob(job, supabase) {
  */
 async function downloadVideo(videoUrl, source) {
   const isTikTok = videoUrl.includes('tiktok.com') || videoUrl.includes('tiktokcdn.com');
+  const isFacebook = videoUrl.includes('facebook.com') || videoUrl.includes('fbcdn.net') || videoUrl.includes('fb.watch');
   
   const headers = {
     'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
@@ -200,6 +272,11 @@ async function downloadVideo(videoUrl, source) {
     headers['Sec-Fetch-Dest'] = 'video';
     headers['Sec-Fetch-Mode'] = 'no-cors';
     headers['Sec-Fetch-Site'] = 'same-site';
+  } else if (isFacebook) {
+    headers['Referer'] = 'https://www.facebook.com/';
+    headers['Origin'] = 'https://www.facebook.com';
+    headers['Accept'] = 'video/mp4,video/*,*/*;q=0.9';
+    headers['Accept-Language'] = 'en-US,en;q=0.9';
   }
 
   const controller = new AbortController();
@@ -454,17 +531,22 @@ async function parseWorkoutWithAI(caption, extractedText, openAIKey) {
  * Update workout in Supabase
  */
 async function updateWorkout(supabase, workoutId, updates) {
-  const updateData = {
-    status: updates.status,
-  };
+  const updateData = {};
 
+  if (updates.status !== undefined) updateData.status = updates.status;
   if (updates.exercises) updateData.exercises = updates.exercises;
   if (updates.name) updateData.name = updates.name;
   if (updates.duration) updateData.duration = updates.duration;
   if (updates.difficulty) updateData.difficulty = updates.difficulty;
   if (updates.notes) updateData.notes = updates.notes;
   if (updates.displayUrl) updateData.display_url = updates.displayUrl;
+  if (updates.videoUrl) updateData.video_url = updates.videoUrl;
+  if (updates.storedVideoUrls) updateData.stored_video_urls = updates.storedVideoUrls;
   if (updates.processingError) updateData.processing_error = updates.processingError;
+
+  if (Object.keys(updateData).length === 0) {
+    return;
+  }
 
   const { error } = await supabase
     .from('workouts')
