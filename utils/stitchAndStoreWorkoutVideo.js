@@ -30,16 +30,16 @@ async function stitchAndStoreWorkoutVideo(supabase, {
     }
 
     const outputPath = path.join('/tmp', `stitched_${workoutId}_${Date.now()}.mp4`);
-    await stitchVideos(downloadedPaths, outputPath);
+    const finalPath = await stitchVideos(downloadedPaths, outputPath);
 
     const permanentUrl = await uploadWorkoutSourceVideo(supabase, {
-      localPath: outputPath,
+      localPath: finalPath,
       userId,
       workoutId,
       index: 'stitched',
     });
 
-    await unlink(outputPath).catch(() => {});
+    await unlink(finalPath).catch(() => {});
 
     if (!permanentUrl) {
       throw new Error('Failed to upload stitched video');
