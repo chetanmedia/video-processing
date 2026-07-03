@@ -14,6 +14,9 @@ const { downloadVideo } = require('../utils/videoDownload');
 const { stitchVideos } = require('../utils/videoStitcher');
 const { ensureIosCompatibleVideo } = require('../utils/videoTranscoder');
 
+const FRAME_SAMPLE_STEP = 3;
+const FRAME_SAMPLE_INTERVAL_MS = FRAME_SAMPLE_STEP * 1000;
+
 /**
  * Extract frames from a local video file (no upload).
  */
@@ -23,9 +26,10 @@ async function extractFramesFromLocalFile({
   thumbnailFrameRef,
   captureThumbnail,
   videoLabel,
+  timeOffsetMs = 0,
 }) {
   console.log(`📦 Extracting frames from ${videoLabel}...`);
-  const { frames, firstFrame } = await extractFrames(videoPath);
+  const { frames, firstFrame } = await extractFrames(videoPath, timeOffsetMs);
 
   if (captureThumbnail && firstFrame) {
     thumbnailFrameRef.value = firstFrame;
@@ -82,12 +86,18 @@ module.exports = async function processVideoJob(job, supabase) {
     }
 
     for (let i = 0; i < localVideoPaths.length; i++) {
+      let timeOffsetMs = 0;
+      for (let j = 0; j < i; j += 1) {
+        timeOffsetMs += await getVideoDurationMs(localVideoPaths[j]);
+      }
+
       await extractFramesFromLocalFile({
         videoPath: localVideoPaths[i],
         allFrames,
         thumbnailFrameRef,
         captureThumbnail: i === 0,
         videoLabel: `video ${i + 1}/${totalVideos}`,
+        timeOffsetMs,
       });
       job.progress(25 + (i + 1) * 25 / Math.max(totalVideos, 1));
     }
@@ -124,16 +134,25 @@ module.exports = async function processVideoJob(job, supabase) {
 
     // Step 3: Extract text from frames using OpenAI Vision
     console.log('🔍 Step 3: Extracting text from frames...');
-    const extractedText = await extractTextFromFrames(allFrames, openAIKey);
+    const frameTexts = await extractTextFromFrames(allFrames, openAIKey);
     job.progress(75);
 
-    if (!extractedText || extractedText.length === 0) {
+    if (!frameTexts.length) {
       throw new Error('No text extracted from video frames');
     }
+
+    const extractedText = frameTexts.map((frame) => frame.text).join('\n\n');
 
     // Step 4: Parse workout with AI
     console.log('🤖 Step 4: Parsing workout with AI...');
     const workoutData = await parseWorkoutWithAI(caption, extractedText, openAIKey);
+    workoutData.exercises = assignExerciseMarkersFromFrames(
+      workoutData.exercises,
+      frameTexts,
+    );
+    console.log(
+      `📍 Assigned video markers for ${workoutData.exercises.filter((exercise) => exercise.videoStartMs != null).length}/${workoutData.exercises.length} frame-detected exercises`,
+    );
     job.progress(90);
 
     // Step 5: Update workout in database
@@ -219,9 +238,30 @@ module.exports = async function processVideoJob(job, supabase) {
 };
 
 /**
- * Extract frames from video using local FFmpeg
+ * Read video duration in milliseconds via ffprobe.
  */
-async function extractFrames(videoPath) {
+async function getVideoDurationMs(videoPath) {
+  try {
+    const { stdout } = await execPromise(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`,
+      { timeout: 30000, maxBuffer: 1024 * 1024 },
+    );
+    const seconds = parseFloat(String(stdout).trim());
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      return 0;
+    }
+    return Math.round(seconds * 1000);
+  } catch (error) {
+    console.warn(`⚠️ Could not read duration for ${videoPath}:`, error.message);
+    return 0;
+  }
+}
+
+/**
+ * Extract frames from video using local FFmpeg.
+ * Returns sampled frames every FRAME_SAMPLE_STEP seconds with timestamps.
+ */
+async function extractFrames(videoPath, timeOffsetMs = 0) {
   // Check if file exists
   if (!fs.existsSync(videoPath)) {
     throw new Error(`Video file not found: ${videoPath}`);
@@ -272,14 +312,14 @@ async function extractFrames(videoPath) {
     const frames = [];
     let firstFrame = null;
     
-    for (let i = 0; i < frameFiles.length; i += 3) { // Take every 3rd frame (3 second intervals)
+    for (let i = 0; i < frameFiles.length; i += FRAME_SAMPLE_STEP) {
       const framePath = path.join(framesDir, frameFiles[i]);
       const imageBuffer = fs.readFileSync(framePath);
       const base64 = imageBuffer.toString('base64');
       const dataUrl = `data:image/png;base64,${base64}`;
-      frames.push(dataUrl);
-      
-      // Save first frame as thumbnail
+      const timeMs = timeOffsetMs + i * 1000;
+      frames.push({ dataUrl, timeMs });
+
       if (i === 0) {
         firstFrame = dataUrl;
       }
@@ -291,7 +331,7 @@ async function extractFrames(videoPath) {
     }
     fs.rmdirSync(framesDir);
     
-    console.log(`✅ Extracted ${frames.length} frames from ${frameFiles.length} total (every 3 seconds)`);
+    console.log(`✅ Extracted ${frames.length} frames from ${frameFiles.length} total (every ${FRAME_SAMPLE_STEP} seconds)`);
     return { frames, firstFrame };
     
   } catch (error) {
@@ -325,13 +365,18 @@ async function extractFrames(videoPath) {
 }
 
 /**
- * Extract text from video frames using OpenAI Vision
+ * Extract text from video frames using OpenAI Vision.
+ * Preserves the timestamp of each sampled frame.
  */
 async function extractTextFromFrames(frames, openAIKey) {
-  const allTexts = [];
+  const frameTexts = [];
 
   for (let i = 0; i < frames.length; i++) {
-    console.log(`📝 Processing frame ${i + 1}/${frames.length}...`);
+    const frame = frames[i];
+    const imageUrl = typeof frame === 'string' ? frame : frame.dataUrl;
+    const timeMs = typeof frame === 'string' ? i * FRAME_SAMPLE_INTERVAL_MS : frame.timeMs;
+
+    console.log(`📝 Processing frame ${i + 1}/${frames.length} @ ${timeMs}ms...`);
 
     try {
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -352,8 +397,8 @@ async function extractTextFromFrames(frames, openAIKey) {
               {
                 type: 'image_url',
                 image_url: {
-                  url: frames[i],
-                  detail: 'low', // Low = 85 tokens, High = 25k tokens per image!
+                  url: imageUrl,
+                  detail: 'low',
                 },
               },
             ],
@@ -366,7 +411,7 @@ async function extractTextFromFrames(frames, openAIKey) {
         const data = await response.json();
         const text = data.choices[0]?.message?.content || '';
         if (text.trim().length > 0) {
-          allTexts.push(text.trim());
+          frameTexts.push({ timeMs, text: text.trim() });
         }
       } else {
         const errorData = await response.json().catch(() => ({}));
@@ -377,10 +422,81 @@ async function extractTextFromFrames(frames, openAIKey) {
     }
   }
 
-  const combinedText = allTexts.join('\n\n');
-  console.log(`✅ Extracted text from ${allTexts.length}/${frames.length} frames`);
-  
-  return combinedText;
+  console.log(`✅ Extracted text from ${frameTexts.length}/${frames.length} frames`);
+  return frameTexts;
+}
+
+function normalizeExerciseMatchText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findFirstFrameForExercise(exerciseName, frameTexts) {
+  const normalizedName = normalizeExerciseMatchText(exerciseName);
+  if (!normalizedName) {
+    return null;
+  }
+
+  const tokens = normalizedName.split(' ').filter((token) => token.length > 2);
+  for (const frame of frameTexts) {
+    const haystack = normalizeExerciseMatchText(frame.text);
+    if (!haystack) {
+      continue;
+    }
+
+    if (haystack.includes(normalizedName)) {
+      return frame;
+    }
+
+    if (tokens.length > 0 && tokens.every((token) => haystack.includes(token))) {
+      return frame;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Pin each frame-detected exercise to the first sampled frame where it appears.
+ */
+function assignExerciseMarkersFromFrames(exercises, frameTexts) {
+  if (!Array.isArray(exercises) || exercises.length === 0) {
+    return exercises;
+  }
+
+  let fallbackMs = 0;
+
+  const withMarkers = exercises.map((exercise) => {
+    const matchedFrame = findFirstFrameForExercise(exercise?.name, frameTexts);
+    const videoStartMs = matchedFrame?.timeMs ?? fallbackMs;
+
+    if (!matchedFrame) {
+      fallbackMs += FRAME_SAMPLE_INTERVAL_MS;
+    }
+
+    return {
+      ...exercise,
+      videoStartMs,
+      videoMarkerAttached: true,
+    };
+  });
+
+  return withMarkers.map((exercise, index) => {
+    const nextExercise = withMarkers
+      .slice(index + 1)
+      .find((item) => item.videoStartMs != null && item.videoStartMs > exercise.videoStartMs);
+    if (!nextExercise) {
+      return exercise;
+    }
+
+    return {
+      ...exercise,
+      videoEndMs: nextExercise.videoStartMs,
+    };
+  });
 }
 
 /**
