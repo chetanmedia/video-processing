@@ -28,8 +28,6 @@ console.log('  OPENAI_API_KEY:', process.env.OPENAI_API_KEY ? '✅ Set' : '❌ M
 console.log('  APIFY_TOKEN:', process.env.APIFY_TOKEN ? '✅ Set' : '❌ Missing');
 console.log('  REDIS_URL:', process.env.REDIS_URL ? '✅ Set' : '❌ Missing');
 
-const { registerWorkoutApiRoutes } = require('./workoutApiHandlers');
-
 // Initialize Supabase client
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
   console.error('❌ ERROR: Missing required environment variables!');
@@ -355,9 +353,6 @@ app.get('/api/stats', async (req, res) => {
     res.status(500).json({ error: 'Failed to get stats' });
   }
 });
-
-// Workout AI / caption proxy routes (OpenAI + Apify server-side only)
-registerWorkoutApiRoutes(app);
 
 // Start server
 app.listen(PORT, () => {
