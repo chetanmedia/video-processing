@@ -21,7 +21,7 @@ async function getVideoCodec(filePath) {
 }
 
 /**
- * Ensure a local MP4 can play in iOS AVPlayer (H.264 + AAC, faststart).
+ * Ensure a local MP4 can play on mobile (H.264 + AAC, faststart, frequent keyframes for scrubbing).
  * Instagram often serves VP9-in-MP4, which expo-av rejects on iOS.
  */
 async function ensureIosCompatibleVideo(inputPath, preferredOutputPath) {
@@ -60,7 +60,7 @@ async function ensureIosCompatibleVideo(inputPath, preferredOutputPath) {
   );
 
   await execPromise(
-    `ffmpeg -y -i "${inputPath}" -c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart "${outputPath}"`,
+    `ffmpeg -y -i "${inputPath}" -c:v libx264 -preset fast -crf 23 -g 30 -keyint_min 30 -sc_threshold 0 -c:a aac -movflags +faststart "${outputPath}"`,
     { timeout: 300000, maxBuffer: 10 * 1024 * 1024 },
   );
 

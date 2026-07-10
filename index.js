@@ -18,13 +18,14 @@ const upload = multer({
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
 // Debug: Log environment variables (without exposing full values)
 console.log('🔍 Environment Check:');
 console.log('  SUPABASE_URL:', process.env.SUPABASE_URL ? '✅ Set' : '❌ Missing');
 console.log('  SUPABASE_SERVICE_ROLE_KEY:', process.env.SUPABASE_SERVICE_ROLE_KEY ? '✅ Set' : '❌ Missing');
 console.log('  OPENAI_API_KEY:', process.env.OPENAI_API_KEY ? '✅ Set' : '❌ Missing');
+console.log('  APIFY_TOKEN:', process.env.APIFY_TOKEN ? '✅ Set' : '❌ Missing');
 console.log('  REDIS_URL:', process.env.REDIS_URL ? '✅ Set' : '❌ Missing');
 
 // Initialize Supabase client
@@ -56,6 +57,8 @@ const videoQueue = new Queue('video-processing', process.env.REDIS_URL || 'redis
 // Import job processor
 const processVideoJob = require('./processors/videoProcessor');
 const { stitchAndStoreWorkoutVideo } = require('./utils/stitchAndStoreWorkoutVideo');
+const workoutOpenAi = require('./utils/workoutOpenAi');
+const apifyCaption = require('./utils/apifyCaption');
 
 // Process jobs with concurrency
 // Process up to N jobs simultaneously (configurable via env var)
@@ -79,6 +82,91 @@ videoQueue.on('failed', (job, err) => {
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// --- Secure import API (OpenAI + Apify keys stay server-side) ---
+
+app.post('/api/validate-workout', async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'Missing required field: text' });
+    }
+
+    const result = await workoutOpenAi.validateWorkoutContent(text);
+    res.json(result);
+  } catch (error) {
+    console.error('❌ validate-workout failed:', error.message);
+    res.status(500).json({ error: 'Failed to validate workout content', message: error.message });
+  }
+});
+
+app.post('/api/parse-workout', async (req, res) => {
+  try {
+    const { text, predictDifficulty } = req.body;
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'Missing required field: text' });
+    }
+
+    const workout = await workoutOpenAi.parseWorkoutWithAI(text);
+    if (predictDifficulty && workout.exercises?.length > 0 && !workout.difficulty) {
+      try {
+        workout.difficulty = await workoutOpenAi.predictDifficulty(workout);
+      } catch (difficultyError) {
+        console.warn('⚠️ Difficulty prediction failed:', difficultyError.message);
+      }
+    }
+
+    res.json({ workout });
+  } catch (error) {
+    console.error('❌ parse-workout failed:', error.message);
+    res.status(500).json({ error: 'Failed to parse workout', message: error.message });
+  }
+});
+
+app.post('/api/extract-caption', async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({ error: 'Missing required field: url' });
+    }
+
+    const extracted = await apifyCaption.extractCaption(url);
+    res.json({ extracted });
+  } catch (error) {
+    console.error('❌ extract-caption failed:', error.message);
+    res.status(500).json({ error: 'Failed to extract caption', message: error.message });
+  }
+});
+
+app.post('/api/extract-image-text', async (req, res) => {
+  try {
+    const { imageUrl } = req.body;
+    if (!imageUrl || typeof imageUrl !== 'string') {
+      return res.status(400).json({ error: 'Missing required field: imageUrl' });
+    }
+
+    const text = await workoutOpenAi.extractTextFromImage(imageUrl);
+    res.json({ text });
+  } catch (error) {
+    console.error('❌ extract-image-text failed:', error.message);
+    res.status(500).json({ error: 'Failed to extract image text', message: error.message });
+  }
+});
+
+app.post('/api/extract-frame-text', async (req, res) => {
+  try {
+    const { frameUrl } = req.body;
+    if (!frameUrl || typeof frameUrl !== 'string') {
+      return res.status(400).json({ error: 'Missing required field: frameUrl' });
+    }
+
+    const text = await workoutOpenAi.extractTextFromFrame(frameUrl);
+    res.json({ text });
+  } catch (error) {
+    console.error('❌ extract-frame-text failed:', error.message);
+    res.status(500).json({ error: 'Failed to extract frame text', message: error.message });
+  }
 });
 
 // FFmpeg check endpoint
