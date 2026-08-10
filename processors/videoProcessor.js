@@ -184,7 +184,8 @@ module.exports = async function processVideoJob(job, supabase) {
         supabase,
         userId,
         workoutData.name || 'Your workout',
-        true
+        true,
+        workoutId
       );
     } catch (notifError) {
       // Don't fail the job if notification fails
@@ -225,7 +226,8 @@ module.exports = async function processVideoJob(job, supabase) {
           supabase,
           userId,
           'Workout',
-          false
+          false,
+          workoutId
         );
       } catch (notifError) {
         console.warn('⚠️ Failed to send failure notification:', notifError.message);

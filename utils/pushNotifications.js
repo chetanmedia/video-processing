@@ -95,7 +95,7 @@ async function getUserPushToken(supabase, userId) {
  * @param {boolean} success - Whether processing was successful
  * @returns {Promise<boolean>} - Success status
  */
-async function sendWorkoutProcessingNotification(supabase, userId, workoutName, success = true) {
+async function sendWorkoutProcessingNotification(supabase, userId, workoutName, success = true, workoutId = null) {
   try {
     // Get user's push token
     const pushToken = await getUserPushToken(supabase, userId);
@@ -113,6 +113,7 @@ async function sendWorkoutProcessingNotification(supabase, userId, workoutName, 
           data: {
             type: 'workout_processed',
             workoutName,
+            workoutId,
             success: true,
           },
         }
@@ -122,6 +123,7 @@ async function sendWorkoutProcessingNotification(supabase, userId, workoutName, 
           data: {
             type: 'workout_processed',
             workoutName,
+            workoutId,
             success: false,
           },
         };

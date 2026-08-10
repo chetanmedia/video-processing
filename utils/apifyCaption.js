@@ -15,12 +15,11 @@ function isFacebookUrl(url) {
   return normalized.includes('facebook.com') || normalized.includes('fb.watch') || normalized.includes('fb.com');
 }
 
-async function waitForApifyRun(actorPath, runId, token) {
+async function waitForApifyRun(actorPath, runId, token, maxAttempts = 30) {
   let status = 'RUNNING';
   let attempts = 0;
-  const maxAttempts = 30;
 
-  while (status === 'RUNNING' && attempts < maxAttempts) {
+  while ((status === 'RUNNING' || status === 'READY') && attempts < maxAttempts) {
     await sleep(3000);
     const statusResponse = await axios.get(`https://api.apify.com/v2/acts/${actorPath}/runs/${runId}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -32,6 +31,64 @@ async function waitForApifyRun(actorPath, runId, token) {
   if (status !== 'SUCCEEDED') {
     throw new Error(`Apify run did not succeed. Status: ${status}`);
   }
+}
+
+function isTikTokPageUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  const lower = value.toLowerCase();
+  return (
+    (lower.includes('tiktok.com/') || lower.includes('vm.tiktok.com') || lower.includes('vt.tiktok.com')) &&
+    !lower.includes('.mp4') &&
+    !lower.includes('tiktokcdn')
+  );
+}
+
+function isLikelyDirectVideoUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  const lower = value.toLowerCase();
+  return (
+    lower.includes('.mp4') ||
+    lower.includes('tiktokcdn') ||
+    lower.includes('apify') ||
+    lower.includes('byteoversea') ||
+    lower.includes('muscdn') ||
+    lower.includes('/media/') ||
+    lower.includes('video_mp4')
+  );
+}
+
+/** Prefer Apify-downloaded / CDN MP4 links over TikTok page URLs. */
+function pickTikTokVideoUrl(post) {
+  const mediaUrls = Array.isArray(post?.mediaUrls) ? post.mediaUrls : [];
+  const candidates = [
+    ...mediaUrls,
+    post?.videoUrl,
+    post?.downloadUrl,
+    post?.downloadedVideoUrl,
+    post?.videoMeta?.downloadAddr,
+    post?.videoMeta?.playAddr,
+    post?.video?.downloadAddr,
+    post?.video?.playAddr,
+    post?.downloadAddr,
+    post?.playAddr,
+  ].filter((url) => typeof url === 'string' && url.trim().length > 0);
+
+  const direct = candidates.find((url) => isLikelyDirectVideoUrl(url) && !isTikTokPageUrl(url));
+  if (direct) return direct;
+
+  const nonPage = candidates.find((url) => !isTikTokPageUrl(url));
+  return nonPage || undefined;
+}
+
+function normalizeTikTokHashtags(hashtags) {
+  if (!Array.isArray(hashtags)) return [];
+  return hashtags
+    .map((tag) => {
+      if (typeof tag === 'string') return tag.startsWith('#') ? tag : `#${tag}`;
+      if (tag?.name) return tag.name.startsWith('#') ? tag.name : `#${tag.name}`;
+      return null;
+    })
+    .filter(Boolean);
 }
 
 async function fetchApifyDataset(datasetId, token) {
@@ -91,24 +148,32 @@ async function extractInstagramWithApify(url, token) {
 }
 
 async function extractTikTokWithApify(url, token) {
+  // shouldDownloadVideos fills mediaUrls with playable CDN/Apify links.
+  // Without it, videoUrl is often missing and TikTok page HTML scrape fails.
   const runResponse = await axios.post(
     'https://api.apify.com/v2/acts/clockworks~tiktok-scraper/runs',
     {
       postURLs: [url],
       resultsPerPage: 1,
+      scrapeRelatedVideos: false,
+      shouldDownloadVideos: true,
+      shouldDownloadCovers: true,
+      shouldDownloadSlideshowImages: true,
+      shouldDownloadSubtitles: false,
     },
     {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      timeout: 90000,
+      timeout: 120000,
     }
   );
 
   const runId = runResponse.data.data.id;
   const datasetId = runResponse.data.data.defaultDatasetId;
-  await waitForApifyRun('clockworks~tiktok-scraper', runId, token);
+  // Video download add-on can take longer than metadata-only scrapes
+  await waitForApifyRun('clockworks~tiktok-scraper', runId, token, 60);
   const items = await fetchApifyDataset(datasetId, token);
 
   if (!items?.length) {
@@ -116,21 +181,65 @@ async function extractTikTokWithApify(url, token) {
   }
 
   const post = items[0];
-  const text = post.text || post.desc || post.description || '';
-  if (!text.trim()) {
-    throw new Error('No caption found in TikTok post');
+  const hashtags = normalizeTikTokHashtags(post.hashtags);
+  const textParts = [
+    post.text,
+    post.desc,
+    post.description,
+    post.subtitle,
+    post.transcript,
+    post.videoMeta?.subtitle,
+  ].filter((part) => typeof part === 'string' && part.trim().length > 0);
+
+  let combinedText = textParts.join('\n\n').trim();
+  if (hashtags.length) {
+    combinedText = `${combinedText}${combinedText ? '\n\n' : ''}Hashtags: ${hashtags.join(' ')}`;
   }
 
+  const videoUrl = pickTikTokVideoUrl(post);
+  const slideshowImages = Array.isArray(post.slideshowImages)
+    ? post.slideshowImages
+    : Array.isArray(post.images)
+      ? post.images
+      : [];
+
+  // Many TikTok workouts put exercises in the video, not the caption.
+  // Keep a stub caption so the client can still run frame extraction when video exists.
+  if (!combinedText.trim()) {
+    if (videoUrl || slideshowImages.length > 0) {
+      combinedText = 'TikTok workout video';
+    } else {
+      throw new Error('No caption or video found in TikTok post');
+    }
+  }
+
+  console.log('🎵 TikTok Apify extract:', {
+    hasText: combinedText.length > 0,
+    textLength: combinedText.length,
+    hasVideoUrl: Boolean(videoUrl),
+    mediaUrlsCount: Array.isArray(post.mediaUrls) ? post.mediaUrls.length : 0,
+    slideshowCount: slideshowImages.length,
+    videoUrlPreview: videoUrl ? String(videoUrl).slice(0, 120) : null,
+  });
+
   return {
-    text: text.trim(),
-    displayUrl: post.coverUrl || post.videoMeta?.coverUrl || post.authorMeta?.avatar,
-    hashtags: post.hashtags?.map((tag) => (typeof tag === 'string' ? tag : tag?.name)).filter(Boolean) || [],
+    text: combinedText.trim(),
+    displayUrl:
+      post.coverUrl ||
+      post.videoMeta?.coverUrl ||
+      post.videoMeta?.originalCoverUrl ||
+      post.covers?.[0] ||
+      post.authorMeta?.avatar,
+    hashtags,
     url: post.webVideoUrl || post.url || url,
     source: 'TikTok',
-    type: 'Video',
-    videoUrl: post.videoUrl || post.videoMeta?.downloadAddr || post.downloadAddr,
-    childPosts: post.slideshowImages?.length
-      ? post.slideshowImages.map((image) => ({ displayUrl: image, videoUrl: undefined }))
+    type: videoUrl ? 'Video' : slideshowImages.length ? 'Slideshow' : 'Video',
+    videoUrl,
+    childPosts: slideshowImages.length
+      ? slideshowImages.map((image) => ({
+          displayUrl: typeof image === 'string' ? image : image?.url || image?.displayUrl,
+          videoUrl: undefined,
+        }))
       : undefined,
   };
 }
@@ -187,13 +296,22 @@ async function extractFacebookWithApify(url, token) {
   };
 }
 
+function isTikTokUrl(url) {
+  const normalized = String(url || '').toLowerCase();
+  return (
+    normalized.includes('tiktok.com') ||
+    normalized.includes('vm.tiktok.com') ||
+    normalized.includes('vt.tiktok.com')
+  );
+}
+
 async function extractCaption(url) {
   const token = getApifyToken();
 
   if (url.includes('instagram.com')) {
     return extractInstagramWithApify(url, token);
   }
-  if (url.includes('tiktok.com')) {
+  if (isTikTokUrl(url)) {
     return extractTikTokWithApify(url, token);
   }
   if (isFacebookUrl(url)) {

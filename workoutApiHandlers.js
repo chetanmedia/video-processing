@@ -305,15 +305,15 @@ async function extractTikTokWithApify(url, apifyToken) {
     {
       postURLs: [url],
       scrapeRelatedVideos: false,
-      resultsPerPage: 100,
-      shouldDownloadVideos: false,
-      shouldDownloadCovers: false,
+      resultsPerPage: 1,
+      shouldDownloadVideos: true,
+      shouldDownloadCovers: true,
       shouldDownloadSubtitles: false,
-      shouldDownloadSlideshowImages: false,
+      shouldDownloadSlideshowImages: true,
     },
     {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apifyToken}` },
-      timeout: 90000,
+      timeout: 120000,
     },
   );
   const runId = runResponse.data.data.id;
@@ -328,26 +328,57 @@ async function extractTikTokWithApify(url, apifyToken) {
   let combinedText = '';
   if (video.description?.trim()) combinedText += video.description + '\n\n';
   if (video.text?.trim()) combinedText += video.text + '\n';
+  if (video.desc?.trim()) combinedText += video.desc + '\n';
   const hashtags = normalizeHashtags(video.hashtags);
   if (hashtags.length) combinedText += '\nHashtags: ' + hashtags.join(' ') + '\n';
-  if (!combinedText.trim()) throw new Error('No workout text found in TikTok video');
 
-  const finalVideoUrl =
-    video.videoUrl ||
-    video.downloadUrl ||
-    video.webVideoUrl ||
-    video.video?.downloadAddr ||
-    video.video?.playAddr ||
-    video.videoMeta?.downloadAddr;
+  const mediaUrls = Array.isArray(video.mediaUrls) ? video.mediaUrls : [];
+  const isTikTokPage = (u) => {
+    const s = String(u || '').toLowerCase();
+    return (
+      (s.includes('tiktok.com/@') || s.includes('vm.tiktok.com') || s.includes('vt.tiktok.com')) &&
+      !s.includes('.mp4') &&
+      !s.includes('tiktokcdn') &&
+      !s.includes('apify')
+    );
+  };
+  const candidates = [
+    ...mediaUrls,
+    video.videoUrl,
+    video.downloadUrl,
+    video.downloadedVideoUrl,
+    video.video?.downloadAddr,
+    video.video?.playAddr,
+    video.videoMeta?.downloadAddr,
+    video.videoMeta?.playAddr,
+  ].filter((u) => typeof u === 'string' && u.trim().length > 0 && !isTikTokPage(u));
+
+  const safeVideoUrl =
+    candidates.find(
+      (u) =>
+        u.includes('.mp4') ||
+        u.includes('tiktokcdn') ||
+        u.includes('apify') ||
+        u.includes('byteoversea') ||
+        u.includes('muscdn'),
+    ) || candidates[0];
+
+  if (!combinedText.trim()) {
+    if (safeVideoUrl) {
+      combinedText = 'TikTok workout video';
+    } else {
+      throw new Error('No workout text found in TikTok video');
+    }
+  }
 
   return {
     text: combinedText.trim(),
-    displayUrl: video.authorMeta?.avatar || video.coverUrl || video.cover || video.dynamicCover,
+    displayUrl: video.coverUrl || video.cover || video.dynamicCover || video.authorMeta?.avatar,
     hashtags,
-    url: video.url || url,
+    url: video.webVideoUrl || video.url || url,
     source: 'TikTok',
     type: 'Video',
-    videoUrl: finalVideoUrl,
+    videoUrl: safeVideoUrl,
   };
 }
 
