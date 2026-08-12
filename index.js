@@ -59,6 +59,7 @@ const processVideoJob = require('./processors/videoProcessor');
 const { stitchAndStoreWorkoutVideo } = require('./utils/stitchAndStoreWorkoutVideo');
 const workoutOpenAi = require('./utils/workoutOpenAi');
 const apifyCaption = require('./utils/apifyCaption');
+const { sendSocialActivityNotification } = require('./utils/pushNotifications');
 
 // Process jobs with concurrency
 // Process up to N jobs simultaneously (configurable via env var)
@@ -82,6 +83,30 @@ videoQueue.on('failed', (job, err) => {
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+/** Notify post owner of a like or comment (uses Expo push + users.push_token). */
+app.post('/api/notify-social-activity', async (req, res) => {
+  try {
+    const { postId, actorUserId, type, commentPreview } = req.body || {};
+    if (!postId || !actorUserId || (type !== 'like' && type !== 'comment')) {
+      return res.status(400).json({
+        error: 'Missing or invalid fields: postId, actorUserId, type (like|comment)',
+      });
+    }
+
+    const result = await sendSocialActivityNotification(supabase, {
+      postId,
+      actorUserId,
+      type,
+      commentPreview,
+    });
+
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('❌ notify-social-activity failed:', error.message);
+    res.status(500).json({ error: 'Failed to send social notification', message: error.message });
+  }
 });
 
 // --- Secure import API (OpenAI + Apify keys stay server-side) ---

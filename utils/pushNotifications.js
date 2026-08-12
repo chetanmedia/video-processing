@@ -142,8 +142,105 @@ async function sendWorkoutProcessingNotification(supabase, userId, workoutName, 
   }
 }
 
+/**
+ * Send social feed activity notification (like / comment on a post)
+ * @param {object} supabase
+ * @param {object} params
+ * @param {string} params.postId
+ * @param {string} params.actorUserId - user who liked/commented
+ * @param {'like'|'comment'} params.type
+ * @param {string} [params.commentPreview]
+ * @returns {Promise<{ sent: boolean; reason?: string }>}
+ */
+async function sendSocialActivityNotification(supabase, params) {
+  try {
+    const { postId, actorUserId, type, commentPreview } = params || {};
+    if (!postId || !actorUserId || (type !== 'like' && type !== 'comment')) {
+      return { sent: false, reason: 'invalid_params' };
+    }
+
+    const { data: post, error: postError } = await supabase
+      .from('social_posts')
+      .select('id, user_id, workout_name')
+      .eq('id', postId)
+      .maybeSingle();
+
+    if (postError || !post) {
+      console.error('❌ Social notify: post not found', postError);
+      return { sent: false, reason: 'post_not_found' };
+    }
+
+    // Don't notify yourself
+    if (post.user_id === actorUserId) {
+      return { sent: false, reason: 'self' };
+    }
+
+    const { data: owner, error: ownerError } = await supabase
+      .from('users')
+      .select('id, push_token, notify_social_activity')
+      .eq('id', post.user_id)
+      .maybeSingle();
+
+    if (ownerError || !owner) {
+      console.error('❌ Social notify: owner not found', ownerError);
+      return { sent: false, reason: 'owner_not_found' };
+    }
+
+    // Default true when column is null (pre-migration / unset)
+    if (owner.notify_social_activity === false) {
+      return { sent: false, reason: 'disabled' };
+    }
+
+    if (!owner.push_token) {
+      return { sent: false, reason: 'no_push_token' };
+    }
+
+    const { data: actor } = await supabase
+      .from('users')
+      .select('username')
+      .eq('id', actorUserId)
+      .maybeSingle();
+
+    const actorName = actor?.username || 'Someone';
+    const workoutLabel = post.workout_name ? ` (${post.workout_name})` : '';
+
+    const notification =
+      type === 'like'
+        ? {
+            title: 'New like',
+            body: `${actorName} liked your post${workoutLabel}`,
+            data: {
+              type: 'social_post_like',
+              postId,
+              actorUserId,
+            },
+          }
+        : {
+            title: 'New comment',
+            body: commentPreview
+              ? `${actorName}: ${String(commentPreview).slice(0, 80)}`
+              : `${actorName} commented on your post${workoutLabel}`,
+            data: {
+              type: 'social_post_comment',
+              postId,
+              actorUserId,
+            },
+          };
+
+    const sent = await sendPushNotification(owner.push_token, notification);
+    if (sent) {
+      console.log(`📱 Social ${type} notification sent to ${post.user_id}`);
+    }
+    return { sent, reason: sent ? undefined : 'send_failed' };
+  } catch (error) {
+    console.error('❌ Error sending social activity notification:', error);
+    return { sent: false, reason: 'error' };
+  }
+}
+
 module.exports = {
   sendPushNotification,
   getUserPushToken,
   sendWorkoutProcessingNotification,
+  sendSocialActivityNotification,
 };
