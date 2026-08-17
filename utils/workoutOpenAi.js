@@ -102,13 +102,15 @@ Return ONLY valid JSON in this exact format (no markdown, no explanation):
 }
 
 IMPORTANT:
-- Extract EVERY exercise mentioned
+- Extract EVERY exercise that is explicitly written in the source
 - Include exact reps/time for each exercise
 - If individual exercises have sets mentioned (e.g., "3 sets of 10 squats"), put it in that exercise's sets field
 - If there's a global "Complete X sets/rounds" instruction for the ENTIRE workout, include it in the notes field
 - Preserve rest periods in notes
 - Clean up exercise names (proper capitalization)
-- If time is shown as "x 40s", convert to "40 seconds"`,
+- If time is shown as "x 40s", convert to "40 seconds"
+- NEVER invent or guess exercises that are not written in the source
+- If the source contains FITSAVER_EXTRACT_FROM_VIDEO, or has no specific exercise names with reps/time, return "exercises": [] and name "Imported Workout"`,
       },
     ],
     temperature: 0.2,

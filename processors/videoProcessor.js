@@ -517,7 +517,7 @@ async function parseWorkoutWithAI(caption, extractedText, openAIKey) {
       model: 'gpt-4o-mini',
       messages: [{
         role: 'system',
-        content: 'You are a fitness expert. Extract workout information from the text and return ONLY a valid JSON object with this structure: {"name": "workout name", "exercises": [{"name": "exercise", "reps": "10", "sets": "3", "notes": ""}], "duration": "45 min", "difficulty": "Intermediate", "notes": "any additional notes"}. Do not include any explanation or markdown.',
+        content: 'You are a fitness expert. Extract workout information from the video frames. Ignore placeholder captions like FITSAVER_EXTRACT_FROM_VIDEO. Do not invent exercises that are not written in the source. Return ONLY a valid JSON object with this structure: {"name": "workout name", "exercises": [{"name": "exercise", "reps": "10", "sets": "3", "notes": ""}], "duration": "45 min", "difficulty": "Intermediate", "notes": "any additional notes"}. Do not include any explanation or markdown.',
       }, {
         role: 'user',
         content: combinedText,

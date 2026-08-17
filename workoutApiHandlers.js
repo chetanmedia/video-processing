@@ -83,7 +83,9 @@ Return ONLY valid JSON:
   "notes": "...",
   "duration": "...",
   "difficulty": "Beginner|Intermediate|Advanced"
-}`,
+}
+
+Do NOT invent exercises. If the text contains FITSAVER_EXTRACT_FROM_VIDEO or does not list specific exercises with reps/time, return exercises: [].`,
         },
       ],
       temperature: 0.2,
