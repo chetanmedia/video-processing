@@ -1,5 +1,7 @@
 const axios = require('axios');
 
+const FACEBOOK_VIDEO_ONLY_TEXT = 'FITSAVER_EXTRACT_FROM_VIDEO';
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function getApifyToken() {
@@ -149,14 +151,18 @@ async function extractInstagramWithApify(url, token) {
     ...hashtagsFromCaptionText(caption),
   ]);
 
-  let combinedText = caption;
-  if (hashtags.length) {
-    combinedText = `${combinedText}${combinedText ? '\n\n' : ''}Hashtags: ${hashtags.join(' ')}`;
+  const captionWithHashtags = hashtags.length
+    ? [caption, `Hashtags: ${hashtags.join(' ')}`].filter(Boolean).join('\n\n')
+    : caption;
+  const hasExerciseList = captionLooksLikeExerciseList(caption);
+  let combinedText = captionWithHashtags;
+  if (post.videoUrl && !hasExerciseList) {
+    combinedText = [FACEBOOK_VIDEO_ONLY_TEXT, captionWithHashtags].filter(Boolean).join('\n\n');
   }
 
   if (!combinedText.trim()) {
     if (post.videoUrl) {
-      combinedText = 'FITSAVER_EXTRACT_FROM_VIDEO';
+      combinedText = FACEBOOK_VIDEO_ONLY_TEXT;
     } else {
       throw new Error('No workout text found in post (no caption, no image text)');
     }
@@ -276,8 +282,6 @@ async function extractTikTokWithApify(url, token) {
       : undefined,
   };
 }
-
-const FACEBOOK_VIDEO_ONLY_TEXT = 'FITSAVER_EXTRACT_FROM_VIDEO';
 
 function collectHttpUrlsDeep(value, found = []) {
   if (!value) return found;

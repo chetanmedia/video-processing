@@ -71,21 +71,25 @@ function captionForValidation(text) {
     .trim();
 }
 
-function isIncompleteSocialCaption(caption, tags) {
-  if (tags.length > 0) return false;
-  const value = String(caption || '').trim();
-  if (!value) return true;
-  if (value.length < 16) return true;
-  return /^(watch this|watch on facebook|facebook|instagram|tiktok|shared (post|reel|video)|may be an image)/i.test(
-    value,
+function hasFitnessSignal(caption, tags) {
+  const blob = `${caption} ${tags.join(' ')}`;
+  return /FITSAVER_EXTRACT_FROM_VIDEO|#?(fitness|workout|gymgirl|gym|hiit|pilates|yoga|cardio|crossfit|exercise|coreworkout|deepcore|strength|bodyweight)|(\d+\s*min(ute)?s?\s+workouts?)/i.test(
+    blob,
   );
 }
 
+function isClearlyNotWorkout(caption, tags) {
+  const blob = `${caption} ${tags.join(' ')}`;
+  if (hasFitnessSignal(caption, tags)) return false;
+  return /#?(recipe|recipes|foodie|ootd|fashion|makeup|skincare|travelgram|bookstagram)\b/i.test(blob);
+}
+
 async function validateWorkoutContent(text, hashtags) {
-  const caption = captionForValidation(text);
+  const raw = String(text || '');
+  const caption = captionForValidation(raw);
   const tags = normalizeHashtags([
     ...normalizeHashtags(hashtags),
-    ...hashtagsFromText(text),
+    ...hashtagsFromText(raw),
   ]);
 
   console.log('🧠 Validate workout content:', {
@@ -95,57 +99,18 @@ async function validateWorkoutContent(text, hashtags) {
     hashtags: tags.slice(0, 12),
   });
 
-  // Incomplete scrape (stub/OG text, no hashtags) — do not reject; video processing can still run.
-  if (isIncompleteSocialCaption(caption, tags)) {
-    return { isWorkout: true, reason: 'Caption/hashtags incomplete; will check the video' };
+  // Video imports and incomplete scrapes must not be blocked here.
+  if (/FITSAVER_EXTRACT_FROM_VIDEO/i.test(raw) || hasFitnessSignal(caption, tags)) {
+    return { isWorkout: true, reason: 'Fitness caption, hashtags, or video import' };
   }
 
-  const content = await chatCompletion({
-    model: 'gpt-4o-mini',
-    messages: [
-      {
-        role: 'system',
-        content:
-          'You decide if a social post is fitness/workout related. Use the full caption and the hashtags together. Be inclusive of promotional fitness content.',
-      },
-      {
-        role: 'user',
-        content: `Decide if this social post is related to workouts, exercises, or fitness training.
-
-CAPTION:
-${caption || '(none)'}
-
-HASHTAGS:
-${tags.join(' ') || '(none)'}
-
-Return ONLY valid JSON in this exact format (no markdown, no explanation):
-{
-  "isWorkout": true or false,
-  "reason": "Brief explanation (1 sentence)"
-}
-
-Guidelines:
-- Use BOTH the caption and the hashtags. Hashtags like #workout, #fitness, #gymgirl, #coreworkout, #deepcore, #hiit count as fitness context
-- Return true for workout challenges, workout methods, "X min workouts", gym/core/fitness promo, or training invitations even if no exercise list is written
-- Return true if the caption is motivational but the hashtags are clearly fitness/workout related
-- Return false only for clearly non-fitness topics: recipes, fashion, travel, product reviews, or unrelated lifestyle with no fitness angle
-- Ignore FITSAVER_EXTRACT_FROM_VIDEO placeholders`,
-      },
-    ],
-    temperature: 0.1,
-    max_tokens: 150,
-  });
-
-  const result = JSON.parse(cleanJsonContent(content));
-  // A missing hashtag list usually means the scrape was truncated (OG stub).
-  // Do not block those imports; video processing can still read the workout.
-  if (!result?.isWorkout && tags.length === 0) {
-    return {
-      isWorkout: true,
-      reason: 'Caption scrape had no hashtags; will check the video',
-    };
+  if (isClearlyNotWorkout(caption, tags)) {
+    return { isWorkout: false, reason: 'Caption and hashtags are not workout related' };
   }
-  return result;
+
+  // Ambiguous social captions (promo, challenge, truncated OG) go through.
+  // Parse + video processing decide whether there is a real workout.
+  return { isWorkout: true, reason: 'Caption is ambiguous; will check parse/video' };
 }
 
 async function parseWorkoutWithAI(text) {
