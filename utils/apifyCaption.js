@@ -274,6 +274,7 @@ function facebookIdsFromUrl(url) {
     /\/posts\/(pfbid[\w]+|\d+)/i,
     /\/permalink\.php\?.*story_fbid=(\d+)/i,
     /fb\.watch\/([\w-]+)/i,
+    /\/share\/[rvp]\/([\w-]+)/i,
   ];
   for (const pattern of patterns) {
     const match = value.match(pattern);
@@ -427,27 +428,123 @@ function facebookHashtags(post, caption) {
     .filter(Boolean);
 }
 
-async function runFacebookPostsScraper(startUrl, token, resultsLimit = 1) {
-  const runResponse = await axios.post(
-    'https://api.apify.com/v2/acts/apify~facebook-posts-scraper/runs',
-    {
-      startUrls: [{ url: startUrl }],
-      resultsLimit,
-      captionText: true,
-    },
+function stripFacebookTracking(url) {
+  try {
+    const parsed = new URL(url);
+    ['mibextid', 'fbclid', 'rdid', 'share_url', 'sfnsn'].forEach((param) => parsed.searchParams.delete(param));
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function facebookMetaContent(html, property) {
+  const patterns = [
+    new RegExp(`<meta[^>]+property=["']${property}["'][^>]+content=["']([^"']+)["']`, 'i'),
+    new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+property=["']${property}["']`, 'i'),
+    new RegExp(`<meta[^>]+name=["']${property}["'][^>]+content=["']([^"']+)["']`, 'i'),
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match?.[1]) return decodeHtmlEntities(match[1]);
+  }
+  return '';
+}
+
+function isFacebookShareOrShortUrl(url) {
+  const lower = String(url || '').toLowerCase();
+  return (
+    lower.includes('/share/r/') ||
+    lower.includes('/share/v/') ||
+    lower.includes('/share/p/') ||
+    lower.includes('fb.watch/') ||
+    lower.includes('/share/')
+  );
+}
+
+function isFacebookReelUrl(url) {
+  const lower = String(url || '').toLowerCase();
+  return lower.includes('/share/r/') || lower.includes('/reel/');
+}
+
+async function resolveFacebookShareUrl(url) {
+  const cleaned = stripFacebookTracking(url);
+  try {
+    const response = await axios.get(cleaned, {
+      maxRedirects: 8,
+      timeout: 15000,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        Accept: 'text/html,application/xhtml+xml',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      validateStatus: (status) => status >= 200 && status < 400,
+    });
+
+    const html = typeof response.data === 'string' ? response.data : '';
+    const redirected =
+      response.request?.res?.responseUrl ||
+      response.request?.responseURL ||
+      cleaned;
+    const ogUrl = facebookMetaContent(html, 'og:url');
+
+    return {
+      canonical: stripFacebookTracking(ogUrl || redirected || cleaned),
+      title: facebookMetaContent(html, 'og:title'),
+      description: facebookMetaContent(html, 'og:description'),
+      image: facebookMetaContent(html, 'og:image'),
+      video:
+        facebookMetaContent(html, 'og:video:secure_url') ||
+        facebookMetaContent(html, 'og:video:url') ||
+        facebookMetaContent(html, 'og:video'),
+    };
+  } catch (error) {
+    console.warn('📘 Could not resolve Facebook share URL:', error.message);
+    return { canonical: cleaned };
+  }
+}
+
+async function runFacebookActorDataset(actorPath, token, input, timeout = 180000) {
+  const response = await axios.post(
+    `https://api.apify.com/v2/acts/${actorPath}/run-sync-get-dataset-items`,
+    input,
     {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      timeout: 120000,
+      timeout,
     },
   );
+  return Array.isArray(response.data) ? response.data : [];
+}
 
-  const runId = runResponse.data.data.id;
-  const datasetId = runResponse.data.data.defaultDatasetId;
-  await waitForApifyRun('apify~facebook-posts-scraper', runId, token, 45);
-  return fetchApifyDataset(datasetId, token);
+async function runFacebookPostsScraper(startUrl, token, resultsLimit = 1) {
+  console.log('📘 Running facebook-posts-scraper for', startUrl);
+  return runFacebookActorDataset('apify~facebook-posts-scraper', token, {
+    startUrls: [{ url: startUrl }],
+    resultsLimit,
+    captionText: true,
+  });
+}
+
+async function runFacebookReelsScraper(startUrl, token) {
+  console.log('📘 Running facebook-reels-scraper for', startUrl);
+  return runFacebookActorDataset('apify~facebook-reels-scraper', token, {
+    startUrls: [{ url: startUrl }],
+    resultsLimit: 1,
+  });
 }
 
 async function ocrFacebookImages(imageUrls) {
@@ -475,37 +572,44 @@ function pickMatchingFacebookPost(items, inputUrl) {
 
 async function extractFacebookWithApify(url, token) {
   try {
-    let items = await runFacebookPostsScraper(url, token, 5);
-    let post = pickMatchingFacebookPost(items, url);
+    const resolved = await resolveFacebookShareUrl(url);
+    const canonical = resolved.canonical || stripFacebookTracking(url);
+    const shareOnly = isFacebookShareOrShortUrl(canonical) && isFacebookShareOrShortUrl(url);
+    const startUrls = [...new Set([canonical, stripFacebookTracking(url)].filter((startUrl) => !isFacebookShareOrShortUrl(startUrl)))];
+    console.log('📘 Facebook resolved URLs:', { canonical, startUrls, shareOnly });
 
-    const pageUrl = facebookPageUrlFromPostUrl(url);
-    if ((!post || !postMatchesInput(post, url)) && pageUrl && pageUrl !== url) {
-      console.log('📘 Facebook post not matched; scraping page for the same post:', pageUrl);
-      const pageItems = await runFacebookPostsScraper(pageUrl, token, 20);
-      const matched = pickMatchingFacebookPost(pageItems, url);
-      if (matched && postMatchesInput(matched, url)) {
-        post = matched;
-        items = pageItems;
+    let items = [];
+    for (const startUrl of startUrls) {
+      try {
+        items = await runFacebookPostsScraper(startUrl, token, 1);
+        console.log(`📘 facebook-posts-scraper returned ${items.length} item(s) for ${startUrl}`);
+        if (items.length) break;
+      } catch (error) {
+        console.warn(`📘 facebook-posts-scraper failed for ${startUrl}:`, error.message);
       }
     }
 
-    if (!post) {
-      console.warn('📘 Facebook Posts Scraper returned no items; using video-only fallback');
-      return {
-        text: FACEBOOK_VIDEO_ONLY_TEXT,
-        displayUrl: undefined,
-        hashtags: [],
-        url,
-        source: 'Facebook',
-        type: 'Video',
-        videoUrl: undefined,
-      };
+    if (!items.length && (shareOnly || startUrls.some(isFacebookReelUrl) || isFacebookReelUrl(canonical) || isFacebookReelUrl(url))) {
+      const reelUrls = [...new Set([canonical, stripFacebookTracking(url)].filter(Boolean))];
+      for (const startUrl of reelUrls) {
+        try {
+          items = await runFacebookReelsScraper(startUrl, token);
+          console.log(`📘 facebook-reels-scraper returned ${items.length} item(s) for ${startUrl}`);
+          if (items.length) break;
+        } catch (error) {
+          console.warn(`📘 facebook-reels-scraper failed for ${startUrl}:`, error.message);
+        }
+      }
     }
 
-    let caption = facebookCaptionFromPost(post);
-    const videoUrl = pickFacebookVideoUrl(post);
-    const imageUrls = pickFacebookImageUrls(post);
-    const hasVideoMedia = facebookMediaItems(post).some(isFacebookVideoMedia) || Boolean(videoUrl);
+    const post = pickMatchingFacebookPost(items, resolved.canonical || url) || items[0] || {};
+    const hasPost = Boolean(items.length);
+
+    let caption = facebookCaptionFromPost(post) || resolved.description || resolved.title || '';
+    let videoUrl = pickFacebookVideoUrl(post) || resolved.video || null;
+    const imageUrls = [...new Set([...pickFacebookImageUrls(post), resolved.image].filter(Boolean))];
+    const hasVideoMedia =
+      facebookMediaItems(post).some(isFacebookVideoMedia) || Boolean(videoUrl) || isFacebookReelUrl(resolved.canonical || url);
 
     if (!captionLooksLikeExerciseList(caption) && imageUrls.length) {
       const ocrText = await ocrFacebookImages(imageUrls);
@@ -519,28 +623,27 @@ async function extractFacebookWithApify(url, token) {
     const hasExerciseList = captionLooksLikeExerciseList(caption);
     const text = hasExerciseList ? caption : FACEBOOK_VIDEO_ONLY_TEXT;
 
-    console.log('📘 Facebook Posts Scraper extract:', {
-      matched: postMatchesInput(post, url),
-      postId: post.postId || post.id,
+    console.log('📘 Facebook extract:', {
+      hasPost,
+      itemKeys: Object.keys(post),
+      canonical: resolved.canonical,
       hasCaption: Boolean(caption),
       hasExerciseList,
       hasVideoUrl: Boolean(videoUrl),
-      hasVideoMedia,
       imageCount: imageUrls.length,
-      videoUrlPreview: videoUrl ? videoUrl.slice(0, 160) : null,
     });
 
     return {
       text,
       displayUrl: imageUrls[0],
       hashtags: facebookHashtags(post, caption),
-      url: post.url || post.topLevelUrl || url,
+      url: post.url || post.topLevelUrl || post.topLevelReelUrl || resolved.canonical || url,
       source: 'Facebook',
       type: hasVideoMedia || videoUrl ? 'Video' : 'Post',
       videoUrl: videoUrl || undefined,
     };
   } catch (error) {
-    console.warn('📘 Facebook Posts Scraper failed; using video-only fallback:', error.message);
+    console.warn('📘 Facebook scrape failed; using video-only fallback:', error.message);
     return {
       text: FACEBOOK_VIDEO_ONLY_TEXT,
       displayUrl: undefined,
