@@ -400,18 +400,63 @@ async function extractFacebookWithApify(url, apifyToken) {
   const post = resultsResponse.data?.[0];
   if (!post) throw new Error('No data returned from Apify');
 
-  const textParts = [post.text, post.caption, post.message, post.title, post.description]
+  const mediaItems = [
+    ...(Array.isArray(post.media) ? post.media : []),
+    ...(Array.isArray(post.attachments) ? post.attachments : []),
+    ...(Array.isArray(post.childPosts) ? post.childPosts : []),
+  ].filter(Boolean);
+
+  const ocrText = mediaItems
+    .map((item) => item?.ocrText || item?.ocr_text || item?.alt)
     .filter((part) => typeof part === 'string' && part.trim().length > 0);
-  if (!textParts.length) throw new Error('No workout text found in Facebook post');
+
+  const textParts = [post.text, post.caption, post.message, post.title, post.description, post.captionText, post.transcript, ...ocrText]
+    .filter((part) => typeof part === 'string' && part.trim().length > 0);
+
+  const videoCandidates = [
+    post.videoUrl,
+    post.playable_url,
+    post.downloadUrl,
+    post.browser_native_hd_url,
+    post.video?.playable_url,
+    ...mediaItems.flatMap((item) => [
+      item.videoUrl,
+      item.playable_url,
+      item.video?.playable_url,
+      item.video?.browser_native_hd_url,
+      item.video?.uri,
+    ]),
+  ].filter((part) => typeof part === 'string' && part.trim().length > 0);
+
+  const videoUrl = videoCandidates.find((u) => {
+    const lower = u.toLowerCase();
+    return lower.includes('.mp4') || lower.includes('fbcdn') || lower.includes('video');
+  }) || videoCandidates[0];
+
+  const imageUrls = [
+    post.displayUrl,
+    post.thumbnailUrl,
+    post.imageUrl,
+    ...mediaItems.map((item) => item.photo_image?.uri || item.image?.uri || item.thumbnail),
+  ].filter((part) => typeof part === 'string' && part.trim().length > 0);
+
+  let text = textParts.join('\n\n').trim();
+  if (!text) {
+    if (videoUrl || imageUrls.length) {
+      text = 'Facebook workout video';
+    } else {
+      throw new Error('No caption or video found in Facebook post');
+    }
+  }
 
   return {
-    text: textParts.join('\n\n').trim(),
-    displayUrl: post.displayUrl || post.thumbnailUrl || post.imageUrl,
+    text,
+    displayUrl: imageUrls[0] || post.displayUrl || post.thumbnailUrl || post.imageUrl,
     hashtags: post.hashtags || [],
     url: post.url || post.postUrl || url,
     source: 'Facebook',
-    type: post.type || (post.videoUrl ? 'Video' : 'Post'),
-    videoUrl: post.videoUrl || post.downloadUrl,
+    type: post.type || (videoUrl ? 'Video' : 'Post'),
+    videoUrl,
     childPosts: post.childPosts,
   };
 }
