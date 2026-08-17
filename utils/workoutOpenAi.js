@@ -49,14 +49,36 @@ function normalizeHashtags(hashtags) {
 }
 
 function hashtagsFromText(text) {
-  return String(text || '').match(/#[\w]+/g) || [];
+  const value = String(text || '');
+  const hashed = value.match(/#[\w]+/g) || [];
+  const lineMatch = value.match(/Hashtags:\s*(.+)/i);
+  const fromLine = lineMatch?.[1]
+    ? lineMatch[1]
+        .split(/[\s,]+/)
+        .map((token) => token.trim())
+        .filter((token) => token && token !== '[object Object]')
+        .map((token) => (token.startsWith('#') ? token : `#${token}`))
+    : [];
+  return [...hashed, ...fromLine];
 }
 
 function captionForValidation(text) {
   return String(text || '')
     .replace(/FITSAVER_EXTRACT_FROM_VIDEO/g, '')
-    .replace(/^Hashtags:\s*/gim, '')
+    .replace(/\[object Object\]/g, '')
+    .replace(/^Hashtags:\s*.+$/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function isIncompleteSocialCaption(caption, tags) {
+  if (tags.length > 0) return false;
+  const value = String(caption || '').trim();
+  if (!value) return true;
+  if (value.length < 16) return true;
+  return /^(watch this|watch on facebook|facebook|instagram|tiktok|shared (post|reel|video)|may be an image)/i.test(
+    value,
+  );
 }
 
 async function validateWorkoutContent(text, hashtags) {
@@ -66,9 +88,16 @@ async function validateWorkoutContent(text, hashtags) {
     ...hashtagsFromText(text),
   ]);
 
-  // Video-only import with no caption/hashtags — let frame extraction decide.
-  if (!caption && tags.length === 0) {
-    return { isWorkout: true, reason: 'No caption or hashtags; will check the video' };
+  console.log('🧠 Validate workout content:', {
+    captionPreview: caption.slice(0, 160),
+    captionLength: caption.length,
+    hashtagCount: tags.length,
+    hashtags: tags.slice(0, 12),
+  });
+
+  // Incomplete scrape (stub/OG text, no hashtags) — do not reject; video processing can still run.
+  if (isIncompleteSocialCaption(caption, tags)) {
+    return { isWorkout: true, reason: 'Caption/hashtags incomplete; will check the video' };
   }
 
   const content = await chatCompletion({
@@ -107,7 +136,16 @@ Guidelines:
     max_tokens: 150,
   });
 
-  return JSON.parse(cleanJsonContent(content));
+  const result = JSON.parse(cleanJsonContent(content));
+  // A missing hashtag list usually means the scrape was truncated (OG stub).
+  // Do not block those imports; video processing can still read the workout.
+  if (!result?.isWorkout && tags.length === 0) {
+    return {
+      isWorkout: true,
+      reason: 'Caption scrape had no hashtags; will check the video',
+    };
+  }
+  return result;
 }
 
 async function parseWorkoutWithAI(text) {

@@ -80,15 +80,31 @@ function pickTikTokVideoUrl(post) {
   return nonPage || undefined;
 }
 
-function normalizeTikTokHashtags(hashtags) {
+function normalizeHashtagList(hashtags) {
   if (!Array.isArray(hashtags)) return [];
-  return hashtags
-    .map((tag) => {
-      if (typeof tag === 'string') return tag.startsWith('#') ? tag : `#${tag}`;
-      if (tag?.name) return tag.name.startsWith('#') ? tag.name : `#${tag.name}`;
-      return null;
-    })
-    .filter(Boolean);
+  return [...new Set(
+    hashtags
+      .map((tag) => {
+        if (typeof tag === 'string') {
+          const value = tag.trim();
+          if (!value || value === '[object Object]') return null;
+          return value.startsWith('#') ? value : `#${value.replace(/^#/, '')}`;
+        }
+        const name = tag?.name || tag?.tag || tag?.hashtag || tag?.slug;
+        if (typeof name !== 'string' || !name.trim()) return null;
+        const value = name.trim();
+        return value.startsWith('#') ? value : `#${value}`;
+      })
+      .filter(Boolean),
+  )];
+}
+
+function hashtagsFromCaptionText(text) {
+  return String(text || '').match(/#[\w]+/g) || [];
+}
+
+function normalizeTikTokHashtags(hashtags) {
+  return normalizeHashtagList(hashtags);
 }
 
 async function fetchApifyDataset(datasetId, token) {
@@ -125,20 +141,37 @@ async function extractInstagramWithApify(url, token) {
   }
 
   const post = items[0];
-  let combinedText = '';
+  const captionParts = [post.caption, post.text, post.alt, post.description]
+    .filter((part) => typeof part === 'string' && part.trim());
+  const caption = [...new Set(captionParts.map((part) => part.trim()))].join('\n\n');
+  const hashtags = normalizeHashtagList([
+    ...(Array.isArray(post.hashtags) ? post.hashtags : []),
+    ...hashtagsFromCaptionText(caption),
+  ]);
 
-  if (post.caption?.trim()) combinedText += `${post.caption}\n\n`;
-  if (post.alt?.trim()) combinedText += `${post.alt}\n`;
-  if (post.hashtags?.length) combinedText += `\nHashtags: ${post.hashtags.join(' ')}\n`;
+  let combinedText = caption;
+  if (hashtags.length) {
+    combinedText = `${combinedText}${combinedText ? '\n\n' : ''}Hashtags: ${hashtags.join(' ')}`;
+  }
 
   if (!combinedText.trim()) {
-    throw new Error('No workout text found in post (no caption, no image text)');
+    if (post.videoUrl) {
+      combinedText = 'FITSAVER_EXTRACT_FROM_VIDEO';
+    } else {
+      throw new Error('No workout text found in post (no caption, no image text)');
+    }
   }
+
+  console.log('📸 Instagram extract:', {
+    captionLength: caption.length,
+    hashtagCount: hashtags.length,
+    hasVideoUrl: Boolean(post.videoUrl),
+  });
 
   return {
     text: combinedText.trim(),
     displayUrl: post.displayUrl,
-    hashtags: post.hashtags || [],
+    hashtags,
     url: post.url || url,
     source: 'Instagram',
     type: post.type,
@@ -483,6 +516,10 @@ async function facebookCaptionFromPost(post) {
       'video_transcript',
       'subtitle',
       'subtitles',
+      'message',
+      'text',
+      'caption',
+      'description',
     ])),
   ].filter((part) => typeof part === 'string' && part.trim());
 
@@ -511,16 +548,10 @@ function captionLooksLikeExerciseList(text) {
 }
 
 function facebookHashtags(post, caption) {
-  const fromCaption = caption.match(/#[\w]+/g) || [];
-  if (fromCaption.length) return fromCaption;
-  if (!Array.isArray(post?.hashtags)) return [];
-  return post.hashtags
-    .map((tag) => {
-      if (typeof tag === 'string') return tag.startsWith('#') ? tag : `#${tag}`;
-      const name = tag?.name || (typeof tag?.url === 'string' ? tag.url.split('/').pop()?.split('?')[0] : '');
-      return name ? (name.startsWith('#') ? name : `#${name}`) : null;
-    })
-    .filter(Boolean);
+  return normalizeHashtagList([
+    ...hashtagsFromCaptionText(caption),
+    ...(Array.isArray(post?.hashtags) ? post.hashtags : []),
+  ]);
 }
 
 function stripFacebookTracking(url) {
