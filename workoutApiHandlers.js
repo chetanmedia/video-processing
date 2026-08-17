@@ -440,14 +440,7 @@ async function extractFacebookWithApify(url, apifyToken) {
     ...mediaItems.map((item) => item.photo_image?.uri || item.image?.uri || item.thumbnail),
   ].filter((part) => typeof part === 'string' && part.trim().length > 0);
 
-  let text = textParts.join('\n\n').trim();
-  if (!text) {
-    if (videoUrl || imageUrls.length) {
-      text = 'Facebook workout video';
-    } else {
-      throw new Error('No caption or video found in Facebook post');
-    }
-  }
+  let text = textParts.join('\n\n').trim() || 'Facebook workout video';
 
   return {
     text,
@@ -456,7 +449,7 @@ async function extractFacebookWithApify(url, apifyToken) {
     url: post.url || post.postUrl || url,
     source: 'Facebook',
     type: post.type || (videoUrl ? 'Video' : 'Post'),
-    videoUrl,
+    videoUrl: videoUrl || url,
     childPosts: post.childPosts,
   };
 }

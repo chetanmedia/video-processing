@@ -244,170 +244,139 @@ async function extractTikTokWithApify(url, token) {
   };
 }
 
-function isFacebookPageUrl(value) {
-  if (typeof value !== 'string' || !value.trim()) return false;
-  const lower = value.toLowerCase();
-  return (
-    (lower.includes('facebook.com/') || lower.includes('fb.watch') || lower.includes('fb.com/')) &&
-    !lower.includes('.mp4') &&
-    !lower.includes('fbcdn')
-  );
-}
-
-function facebookMediaItems(post) {
-  const items = [];
-  if (Array.isArray(post?.media)) items.push(...post.media);
-  if (Array.isArray(post?.attachments)) items.push(...post.attachments);
-  if (Array.isArray(post?.childPosts)) items.push(...post.childPosts);
-  if (post?.video && typeof post.video === 'object') items.push(post.video);
-  return items.filter(Boolean);
-}
-
-function pickFacebookVideoUrl(post) {
-  const candidates = [
-    post?.videoUrl,
-    post?.playable_url,
-    post?.playableUrl,
-    post?.downloadUrl,
-    post?.browser_native_hd_url,
-    post?.browser_native_sd_url,
-    post?.hd_src,
-    post?.sd_src,
-    post?.video?.playable_url,
-    post?.video?.browser_native_hd_url,
-    post?.video?.browser_native_sd_url,
-    post?.video?.uri,
-  ];
-
-  for (const item of facebookMediaItems(post)) {
-    candidates.push(
-      item.videoUrl,
-      item.playable_url,
-      item.playableUrl,
-      item.browser_native_hd_url,
-      item.browser_native_sd_url,
-      item.video?.playable_url,
-      item.video?.browser_native_hd_url,
-      item.video?.browser_native_sd_url,
-      item.video?.uri,
-      item.videoDeliveryLegacyFields?.browser_native_hd_url,
-      item.videoDeliveryLegacyFields?.browser_native_sd_url,
-    );
+function collectHttpUrlsDeep(value, found = []) {
+  if (!value) return found;
+  if (typeof value === 'string') {
+    if (value.startsWith('http')) found.push(value);
+    return found;
   }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectHttpUrlsDeep(item, found));
+    return found;
+  }
+  if (typeof value === 'object') {
+    Object.values(value).forEach((item) => collectHttpUrlsDeep(item, found));
+  }
+  return found;
+}
 
-  const urls = candidates.filter((url) => typeof url === 'string' && url.trim().length > 0);
-  const direct = urls.find((url) => {
+function pickBestFacebookVideoUrl(post, fallbackUrl) {
+  const urls = [...new Set(collectHttpUrlsDeep(post))];
+  const mp4 = urls.find((url) => url.toLowerCase().includes('.mp4'));
+  if (mp4) return mp4;
+  const cdnVideo = urls.find((url) => {
     const lower = url.toLowerCase();
-    return (
-      !isFacebookPageUrl(url) &&
-      (lower.includes('.mp4') || lower.includes('fbcdn') || lower.includes('video'))
-    );
+    return lower.includes('fbcdn') && (lower.includes('video') || lower.includes('/v/t'));
   });
-  return direct || urls.find((url) => !isFacebookPageUrl(url));
+  if (cdnVideo) return cdnVideo;
+  return fallbackUrl;
 }
 
 function facebookImageUrls(post) {
-  const urls = [
-    post?.imageUrl,
-    post?.thumbnailUrl,
-    post?.displayUrl,
-    post?.fullPicture,
-    post?.picture,
-  ];
-  for (const item of facebookMediaItems(post)) {
-    urls.push(
-      item.photo_image?.uri,
-      item.image?.uri,
-      item.thumbnail,
-      item.previewImage,
-      item.imageUrl,
-      item.fullPicture,
+  const urls = [...new Set(collectHttpUrlsDeep(post))];
+  return urls.filter((url) => {
+    const lower = url.toLowerCase();
+    return (
+      lower.includes('scontent') ||
+      (lower.includes('fbcdn') && (lower.includes('.jpg') || lower.includes('.png') || lower.includes('stp=')))
     );
-  }
-  return [...new Set(urls.filter((url) => typeof url === 'string' && url.trim() && !isFacebookPageUrl(url)))];
+  });
 }
 
-function facebookOcrText(post) {
-  return facebookMediaItems(post)
-    .map((item) => item?.ocrText || item?.ocr_text || item?.alt || item?.accessibilityCaption)
-    .filter((part) => typeof part === 'string' && part.trim().length > 0);
+function facebookTextFromPost(post) {
+  const textParts = [
+    post?.text,
+    post?.message,
+    post?.caption,
+    post?.postText,
+    post?.description,
+    post?.title,
+    post?.captionText,
+    post?.transcript,
+    post?.videoTranscript,
+    post?.video_transcript,
+  ].filter((part) => typeof part === 'string' && part.trim().length > 0);
+
+  const media = [
+    ...(Array.isArray(post?.media) ? post.media : []),
+    ...(Array.isArray(post?.attachments) ? post.attachments : []),
+  ];
+  for (const item of media) {
+    const ocr = item?.ocrText || item?.ocr_text || item?.alt;
+    if (typeof ocr === 'string' && ocr.trim()) textParts.push(ocr.trim());
+  }
+
+  return [...new Set(textParts)].join('\n\n').trim();
+}
+
+function facebookStubResult(url, extra = {}) {
+  return {
+    text: extra.text || 'Facebook workout video',
+    displayUrl: extra.displayUrl,
+    hashtags: extra.hashtags || [],
+    url: extra.url || url,
+    source: 'Facebook',
+    type: extra.type || 'Video',
+    videoUrl: extra.videoUrl || url,
+    childPosts: extra.childPosts,
+  };
 }
 
 async function extractFacebookWithApify(url, token) {
-  const runResponse = await axios.post(
-    'https://api.apify.com/v2/acts/apify~facebook-posts-scraper/runs',
-    {
-      startUrls: [{ url }],
-      resultsLimit: 1,
-      captionText: true,
-    },
-    {
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
+  try {
+    const runResponse = await axios.post(
+      'https://api.apify.com/v2/acts/apify~facebook-posts-scraper/runs',
+      {
+        startUrls: [{ url }],
+        resultsLimit: 1,
+        captionText: true,
       },
-      timeout: 90000,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        timeout: 90000,
+      }
+    );
+
+    const runId = runResponse.data.data.id;
+    const datasetId = runResponse.data.data.defaultDatasetId;
+    await waitForApifyRun('apify~facebook-posts-scraper', runId, token);
+    const items = await fetchApifyDataset(datasetId, token);
+    const post = items?.[0];
+
+    if (!post) {
+      console.warn('📘 Facebook Apify returned no items; continuing with video fallback');
+      return facebookStubResult(url);
     }
-  );
 
-  const runId = runResponse.data.data.id;
-  const datasetId = runResponse.data.data.defaultDatasetId;
-  await waitForApifyRun('apify~facebook-posts-scraper', runId, token);
-  const items = await fetchApifyDataset(datasetId, token);
+    const caption = facebookTextFromPost(post);
+    const text = caption || 'Facebook workout video';
+    const videoUrl = pickBestFacebookVideoUrl(post, url);
+    const imageUrls = facebookImageUrls(post);
 
-  if (!items?.length) {
-    throw new Error('No data returned from Apify');
+    console.log('📘 Facebook Apify extract:', {
+      itemKeys: Object.keys(post),
+      hasCaption: Boolean(caption),
+      textLength: text.length,
+      hasVideoUrl: Boolean(videoUrl),
+      imageCount: imageUrls.length,
+      videoUrlPreview: videoUrl ? String(videoUrl).slice(0, 160) : null,
+    });
+
+    return facebookStubResult(url, {
+      text,
+      displayUrl: imageUrls[0],
+      hashtags: Array.isArray(post.hashtags) ? post.hashtags : [],
+      url: post.url || post.postUrl || url,
+      type: post.type || 'Video',
+      videoUrl,
+    });
+  } catch (error) {
+    console.warn('📘 Facebook scrape failed, continuing with video fallback:', error.message);
+    return facebookStubResult(url);
   }
-
-  const post = items[0];
-  const textParts = [
-    post.text,
-    post.message,
-    post.caption,
-    post.postText,
-    post.description,
-    post.title,
-    post.captionText,
-    post.transcript,
-    post.videoTranscript,
-    post.video_transcript,
-    ...facebookOcrText(post),
-  ].filter((part) => typeof part === 'string' && part.trim().length > 0);
-
-  let text = textParts.join('\n\n').trim();
-  const videoUrl = pickFacebookVideoUrl(post);
-  const imageUrls = facebookImageUrls(post);
-  const childPosts = Array.isArray(post.childPosts) && post.childPosts.length
-    ? post.childPosts
-    : imageUrls.slice(1).map((displayUrl) => ({ displayUrl }));
-
-  // Workout details are often in the video/image, not the caption.
-  if (!text) {
-    if (videoUrl || imageUrls.length > 0) {
-      text = 'Facebook workout video';
-    } else {
-      throw new Error('No caption or video found in Facebook post');
-    }
-  }
-
-  console.log('📘 Facebook Apify extract:', {
-    hasText: text.length > 0,
-    textLength: text.length,
-    hasVideoUrl: Boolean(videoUrl),
-    imageCount: imageUrls.length,
-    videoUrlPreview: videoUrl ? String(videoUrl).slice(0, 120) : null,
-  });
-
-  return {
-    text,
-    displayUrl: imageUrls[0] || post.imageUrl || post.thumbnailUrl || post.displayUrl,
-    hashtags: Array.isArray(post.hashtags) ? post.hashtags : [],
-    url: post.url || post.postUrl || url,
-    source: 'Facebook',
-    type: post.type || (videoUrl ? 'Video' : 'Post'),
-    videoUrl,
-    childPosts: childPosts.length ? childPosts : undefined,
-  };
 }
 
 function isTikTokUrl(url) {
