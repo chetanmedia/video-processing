@@ -34,7 +34,28 @@ async function chatCompletion(body) {
   return data.choices?.[0]?.message?.content || '';
 }
 
+function looksLikeWorkoutContent(text) {
+  const value = String(text || '');
+  if (!value.trim()) return false;
+  if (/FITSAVER_EXTRACT_FROM_VIDEO/i.test(value)) return true;
+  if (
+    /#?(fitness|workout|gymgirl|gym|hiit|pilates|yoga|cardio|crossfit|exercise|coreworkout|deepcore|strengthtraining|bodyweight|fitwith)/i.test(
+      value,
+    )
+  ) {
+    return true;
+  }
+  return /\b(\d+\s*min(ute)?s?\s+workouts?|workout\s+challenge|workout\s+method)\b/i.test(value);
+}
+
 async function validateWorkoutContent(text) {
+  if (looksLikeWorkoutContent(text)) {
+    return {
+      isWorkout: true,
+      reason: 'Caption includes fitness keywords, hashtags, or a workout video marker',
+    };
+  }
+
   const content = await chatCompletion({
     model: 'gpt-4o-mini',
     messages: [
@@ -58,6 +79,8 @@ Return ONLY valid JSON in this exact format (no markdown, no explanation):
 
 Guidelines:
 - Return true if content describes exercises, workouts, training routines, fitness movements, or exercise instructions
+- Return true for promotional fitness captions, workout challenges, workout methods, gym/core/fitness hashtags, or "X min workouts" even if no exercise list is included
+- Ignore FITSAVER_EXTRACT_FROM_VIDEO placeholders
 - Return false if content is about recipes, general lifestyle, product reviews, non-fitness activities, or unrelated topics
 - Even if there are NO structured exercises listed, if the content discusses workout activities, training, or exercise movements, return true`,
       },
