@@ -713,12 +713,16 @@ async function extractFacebookWithApify(url, token) {
       }
     }
 
+    const hashtags = facebookHashtags(post, caption);
+    const captionWithHashtags = hashtags.length
+      ? [caption, `Hashtags: ${hashtags.join(' ')}`].filter(Boolean).join('\n\n')
+      : caption;
     const hasExerciseList = captionLooksLikeExerciseList(caption);
     // Use the full caption when it already lists exercises. Only send the
     // video-processing marker when that caption has no exercise information.
     const text = hasExerciseList
-      ? caption
-      : [FACEBOOK_VIDEO_ONLY_TEXT, caption].filter(Boolean).join('\n\n') || FACEBOOK_VIDEO_ONLY_TEXT;
+      ? captionWithHashtags
+      : [FACEBOOK_VIDEO_ONLY_TEXT, captionWithHashtags].filter(Boolean).join('\n\n') || FACEBOOK_VIDEO_ONLY_TEXT;
 
     console.log('📘 Facebook extract:', {
       hasPost,
@@ -733,7 +737,7 @@ async function extractFacebookWithApify(url, token) {
     return {
       text,
       displayUrl: imageUrls[0],
-      hashtags: facebookHashtags(post, caption),
+      hashtags,
       url: post.url || post.topLevelUrl || post.topLevelReelUrl || resolved.canonical || url,
       source: 'Facebook',
       type: hasVideoMedia || videoUrl ? 'Video' : 'Post',

@@ -34,26 +34,41 @@ async function chatCompletion(body) {
   return data.choices?.[0]?.message?.content || '';
 }
 
-function looksLikeWorkoutContent(text) {
-  const value = String(text || '');
-  if (!value.trim()) return false;
-  if (/FITSAVER_EXTRACT_FROM_VIDEO/i.test(value)) return true;
-  if (
-    /#?(fitness|workout|gymgirl|gym|hiit|pilates|yoga|cardio|crossfit|exercise|coreworkout|deepcore|strengthtraining|bodyweight|fitwith)/i.test(
-      value,
-    )
-  ) {
-    return true;
-  }
-  return /\b(\d+\s*min(ute)?s?\s+workouts?|workout\s+challenge|workout\s+method)\b/i.test(value);
+function normalizeHashtags(hashtags) {
+  if (!Array.isArray(hashtags)) return [];
+  return [...new Set(
+    hashtags
+      .map((tag) => {
+        if (typeof tag !== 'string') return '';
+        const value = tag.trim();
+        if (!value) return '';
+        return value.startsWith('#') ? value : `#${value}`;
+      })
+      .filter(Boolean),
+  )];
 }
 
-async function validateWorkoutContent(text) {
-  if (looksLikeWorkoutContent(text)) {
-    return {
-      isWorkout: true,
-      reason: 'Caption includes fitness keywords, hashtags, or a workout video marker',
-    };
+function hashtagsFromText(text) {
+  return String(text || '').match(/#[\w]+/g) || [];
+}
+
+function captionForValidation(text) {
+  return String(text || '')
+    .replace(/FITSAVER_EXTRACT_FROM_VIDEO/g, '')
+    .replace(/^Hashtags:\s*/gim, '')
+    .trim();
+}
+
+async function validateWorkoutContent(text, hashtags) {
+  const caption = captionForValidation(text);
+  const tags = normalizeHashtags([
+    ...normalizeHashtags(hashtags),
+    ...hashtagsFromText(text),
+  ]);
+
+  // Video-only import with no caption/hashtags — let frame extraction decide.
+  if (!caption && tags.length === 0) {
+    return { isWorkout: true, reason: 'No caption or hashtags; will check the video' };
   }
 
   const content = await chatCompletion({
@@ -62,14 +77,17 @@ async function validateWorkoutContent(text) {
       {
         role: 'system',
         content:
-          'You are a fitness content validator. Determine if the provided text is related to workouts, exercises, or fitness training.',
+          'You decide if a social post is fitness/workout related. Use the full caption and the hashtags together. Be inclusive of promotional fitness content.',
       },
       {
         role: 'user',
-        content: `Is the following content related to workouts, exercises, or fitness training?
+        content: `Decide if this social post is related to workouts, exercises, or fitness training.
 
-CONTENT:
-${text}
+CAPTION:
+${caption || '(none)'}
+
+HASHTAGS:
+${tags.join(' ') || '(none)'}
 
 Return ONLY valid JSON in this exact format (no markdown, no explanation):
 {
@@ -78,11 +96,11 @@ Return ONLY valid JSON in this exact format (no markdown, no explanation):
 }
 
 Guidelines:
-- Return true if content describes exercises, workouts, training routines, fitness movements, or exercise instructions
-- Return true for promotional fitness captions, workout challenges, workout methods, gym/core/fitness hashtags, or "X min workouts" even if no exercise list is included
-- Ignore FITSAVER_EXTRACT_FROM_VIDEO placeholders
-- Return false if content is about recipes, general lifestyle, product reviews, non-fitness activities, or unrelated topics
-- Even if there are NO structured exercises listed, if the content discusses workout activities, training, or exercise movements, return true`,
+- Use BOTH the caption and the hashtags. Hashtags like #workout, #fitness, #gymgirl, #coreworkout, #deepcore, #hiit count as fitness context
+- Return true for workout challenges, workout methods, "X min workouts", gym/core/fitness promo, or training invitations even if no exercise list is written
+- Return true if the caption is motivational but the hashtags are clearly fitness/workout related
+- Return false only for clearly non-fitness topics: recipes, fashion, travel, product reviews, or unrelated lifestyle with no fitness angle
+- Ignore FITSAVER_EXTRACT_FROM_VIDEO placeholders`,
       },
     ],
     temperature: 0.1,

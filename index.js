@@ -113,12 +113,12 @@ app.post('/api/notify-social-activity', async (req, res) => {
 
 app.post('/api/validate-workout', async (req, res) => {
   try {
-    const { text } = req.body;
+    const { text, hashtags } = req.body;
     if (!text || typeof text !== 'string') {
       return res.status(400).json({ error: 'Missing required field: text' });
     }
 
-    const result = await workoutOpenAi.validateWorkoutContent(text);
+    const result = await workoutOpenAi.validateWorkoutContent(text, hashtags);
     res.json(result);
   } catch (error) {
     console.error('❌ validate-workout failed:', error.message);
