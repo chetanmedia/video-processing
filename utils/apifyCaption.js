@@ -714,11 +714,11 @@ async function extractFacebookWithApify(url, token) {
     }
 
     const hasExerciseList = captionLooksLikeExerciseList(caption);
-    // Keep the full caption/transcript. If there is a video, force video processing
-    // so a caption with no (or incomplete) exercises still gets frame extraction.
-    const text = videoUrl || hasVideoMedia
-      ? [FACEBOOK_VIDEO_ONLY_TEXT, caption].filter(Boolean).join('\n\n')
-      : caption || FACEBOOK_VIDEO_ONLY_TEXT;
+    // Use the full caption when it already lists exercises. Only send the
+    // video-processing marker when that caption has no exercise information.
+    const text = hasExerciseList
+      ? caption
+      : [FACEBOOK_VIDEO_ONLY_TEXT, caption].filter(Boolean).join('\n\n') || FACEBOOK_VIDEO_ONLY_TEXT;
 
     console.log('📘 Facebook extract:', {
       hasPost,
