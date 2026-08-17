@@ -505,7 +505,18 @@ function assignExerciseMarkersFromFrames(exercises, frameTexts) {
  * Parse workout using OpenAI
  */
 async function parseWorkoutWithAI(caption, extractedText, openAIKey) {
-  const combinedText = `${caption}\n\n=== EXTRACTED FROM VIDEO FRAMES ===\n${extractedText}`;
+  const cleanedCaption = String(caption || '')
+    .replace(/FITSAVER_EXTRACT_FROM_VIDEO/g, '')
+    .trim();
+  const combinedText = `CAPTION AND VIDEO TRANSCRIPT:
+${cleanedCaption || '(none)'}
+
+=== EXTRACTED FROM VIDEO FRAMES ===
+${extractedText}
+
+Use the video frames as the source of truth for the exercise list, reps, and order.
+Use the caption/transcript to fill missing names, rounds, rest, or notes.
+Do not invent exercises that are not in the frames or caption.`;
 
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -517,7 +528,7 @@ async function parseWorkoutWithAI(caption, extractedText, openAIKey) {
       model: 'gpt-4o-mini',
       messages: [{
         role: 'system',
-        content: 'You are a fitness expert. Extract workout information from the video frames. Ignore placeholder captions like FITSAVER_EXTRACT_FROM_VIDEO. Do not invent exercises that are not written in the source. Return ONLY a valid JSON object with this structure: {"name": "workout name", "exercises": [{"name": "exercise", "reps": "10", "sets": "3", "notes": ""}], "duration": "45 min", "difficulty": "Intermediate", "notes": "any additional notes"}. Do not include any explanation or markdown.',
+        content: 'You are a fitness expert. Build the workout from the video frames plus the caption/transcript. Prefer on-screen exercise text from frames. Use the caption/transcript for extra context. Ignore FITSAVER_EXTRACT_FROM_VIDEO placeholders. Do not invent exercises. Return ONLY a valid JSON object with this structure: {"name": "workout name", "exercises": [{"name": "exercise", "reps": "10", "sets": "3", "notes": ""}], "duration": "45 min", "difficulty": "Intermediate", "notes": "any additional notes"}. Do not include any explanation or markdown.',
       }, {
         role: 'user',
         content: combinedText,

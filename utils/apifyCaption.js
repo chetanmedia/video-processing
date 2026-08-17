@@ -390,9 +390,101 @@ function isGenericFacebookOcr(text) {
   return /^(may be an image|image may contain|photo of)/i.test(String(text || '').trim());
 }
 
-function facebookCaptionFromPost(post) {
-  const parts = [post?.text, post?.message, post?.caption, post?.description, post?.title, post?.captionText, post?.transcript]
-    .filter((part) => typeof part === 'string' && part.trim());
+function collectNamedStrings(value, names, found = []) {
+  if (!value) return found;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectNamedStrings(item, names, found));
+    return found;
+  }
+  if (typeof value === 'object') {
+    for (const [key, nested] of Object.entries(value)) {
+      if (names.has(key.toLowerCase()) && typeof nested === 'string' && nested.trim()) {
+        found.push(nested.trim());
+      } else if (nested && typeof nested === 'object') {
+        collectNamedStrings(nested, names, found);
+      }
+    }
+  }
+  return found;
+}
+
+function collectCaptionUrls(value, found = []) {
+  if (!value) return found;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectCaptionUrls(item, found));
+    return found;
+  }
+  if (typeof value === 'object') {
+    for (const [key, nested] of Object.entries(value)) {
+      if (
+        /caption.*url|transcript.*url|subtitles?_url/i.test(key) &&
+        typeof nested === 'string' &&
+        nested.startsWith('http')
+      ) {
+        found.push(nested);
+      } else if (nested && typeof nested === 'object') {
+        collectCaptionUrls(nested, found);
+      }
+    }
+  }
+  return found;
+}
+
+function parseSrtTranscript(srt) {
+  return String(srt || '')
+    .replace(/\r/g, '')
+    .split(/\n\s*\n/)
+    .map((block) =>
+      block
+        .split('\n')
+        .filter((line) => line.trim() && !/^\d+$/.test(line.trim()) && !/-->/.test(line))
+        .join(' ')
+        .trim(),
+    )
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function downloadFacebookTranscripts(post) {
+  const urls = [...new Set(collectCaptionUrls(post))];
+  const texts = [];
+  for (const captionsUrl of urls.slice(0, 3)) {
+    try {
+      const response = await axios.get(captionsUrl, {
+        timeout: 15000,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
+          Referer: 'https://www.facebook.com/',
+        },
+      });
+      const parsed = parseSrtTranscript(response.data);
+      if (parsed) texts.push(parsed);
+    } catch (error) {
+      console.warn('📘 Failed to download Facebook caption file:', error.message);
+    }
+  }
+  return texts;
+}
+
+async function facebookCaptionFromPost(post) {
+  const parts = [
+    post?.text,
+    post?.message,
+    post?.caption,
+    post?.description,
+    post?.title,
+    ...collectNamedStrings(post, new Set([
+      'captiontext',
+      'transcript',
+      'videotranscript',
+      'video_transcript',
+      'subtitle',
+      'subtitles',
+    ])),
+  ].filter((part) => typeof part === 'string' && part.trim());
 
   for (const item of facebookMediaItems(post)) {
     const ocr = item?.ocrText || item?.ocr_text;
@@ -401,7 +493,10 @@ function facebookCaptionFromPost(post) {
     }
   }
 
-  return [...new Set(parts)].join('\n\n').trim();
+  const srtTexts = await downloadFacebookTranscripts(post);
+  parts.push(...srtTexts);
+
+  return [...new Set(parts.map((part) => part.trim()).filter(Boolean))].join('\n\n').trim();
 }
 
 function captionLooksLikeExerciseList(text) {
@@ -605,7 +700,7 @@ async function extractFacebookWithApify(url, token) {
     const post = pickMatchingFacebookPost(items, resolved.canonical || url) || items[0] || {};
     const hasPost = Boolean(items.length);
 
-    let caption = facebookCaptionFromPost(post) || resolved.description || resolved.title || '';
+    let caption = (await facebookCaptionFromPost(post)) || resolved.description || resolved.title || '';
     let videoUrl = pickFacebookVideoUrl(post) || resolved.video || null;
     const imageUrls = [...new Set([...pickFacebookImageUrls(post), resolved.image].filter(Boolean))];
     const hasVideoMedia =
@@ -613,21 +708,23 @@ async function extractFacebookWithApify(url, token) {
 
     if (!captionLooksLikeExerciseList(caption) && imageUrls.length) {
       const ocrText = await ocrFacebookImages(imageUrls);
-      if (captionLooksLikeExerciseList(ocrText)) {
-        caption = ocrText;
-      } else if (ocrText && !caption) {
-        caption = ocrText;
+      if (ocrText) {
+        caption = [caption, ocrText].filter(Boolean).join('\n\n');
       }
     }
 
     const hasExerciseList = captionLooksLikeExerciseList(caption);
-    const text = hasExerciseList ? caption : FACEBOOK_VIDEO_ONLY_TEXT;
+    // Keep the full caption/transcript. If there is a video, force video processing
+    // so a caption with no (or incomplete) exercises still gets frame extraction.
+    const text = videoUrl || hasVideoMedia
+      ? [FACEBOOK_VIDEO_ONLY_TEXT, caption].filter(Boolean).join('\n\n')
+      : caption || FACEBOOK_VIDEO_ONLY_TEXT;
 
     console.log('📘 Facebook extract:', {
       hasPost,
       itemKeys: Object.keys(post),
       canonical: resolved.canonical,
-      hasCaption: Boolean(caption),
+      captionLength: caption.length,
       hasExerciseList,
       hasVideoUrl: Boolean(videoUrl),
       imageCount: imageUrls.length,
